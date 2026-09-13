@@ -1,0 +1,28 @@
+[package]
+name = "tvc-core"
+description = "Weight Threshold Verification Ceremony: trusted-setup, parameter commitment and zero-knowledge inference verification primitives."
+keywords = ["zero-knowledge", "groth16", "nostr", "bitcoin", "attestation"]
+categories = ["cryptography"]
+readme = "../README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+ark-bn254.workspace = true
+ark-ff.workspace = true
+ark-groth16.workspace = true
+ark-relations.workspace = true
+ark-serialize.workspace = true
+ark-snark.workspace = true
+ark-std.workspace = true
+bitcoin_hashes.workspace = true
+secp256k1.workspace = true
+zeroize.workspace = true
+
+[lints.rust]
+missing_docs = "deny"
+unsafe_code = "forbid"

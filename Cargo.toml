@@ -1,0 +1,32 @@
+[workspace]
+members = ["tvc-core", "tvc-cli"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT"
+repository = "https://github.com/sha256rma/w-tvc-protocol"
+homepage = "https://github.com/sha256rma/w-tvc-protocol"
+authors = ["W-TVC Protocol Contributors"]
+
+[workspace.dependencies]
+ark-bn254 = { version = "0.4", default-features = false, features = ["curve"] }
+ark-ff = { version = "0.4", default-features = false }
+ark-groth16 = { version = "0.4", default-features = false }
+ark-relations = { version = "0.4", default-features = false }
+ark-serialize = { version = "0.4", default-features = false }
+ark-snark = { version = "0.4", default-features = false }
+ark-std = { version = "0.4", default-features = false, features = ["std"] }
+bitcoin_hashes = { version = "1.2", default-features = false, features = ["std"] }
+secp256k1 = { version = "0.33", default-features = false, features = ["std"] }
+zeroize = { version = "1.9", default-features = false, features = ["std", "zeroize_derive"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+debug = false
+strip = "symbols"

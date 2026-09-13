@@ -1,0 +1,123 @@
+# ---------------------------------------------------------------------------
+# Secrets and key material — highest priority, listed first and deliberately
+# broad. A ceremony repository that leaks a signing key is worse than useless:
+# an attacker who holds it can sign parameter commitments for models that never
+# went through a ceremony, and every wallet pinned to that key will believe them.
+# ---------------------------------------------------------------------------
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.asc
+*.gpg
+*.kdbx
+*.secret
+*.seed
+*.entropy
+
+# Nostr and Bitcoin key encodings, in every spelling we could think of.
+nsec*
+*nsec*
+*.nsec
+privkey*
+*privkey*
+priv_key*
+secret_key*
+secretkey*
+seckey*
+*.xprv
+xprv*
+mnemonic*
+seed_phrase*
+wallet.dat
+
+# Environment files. .env.example is explicitly re-included below.
+.env
+.env.*
+*.env
+!.env.example
+
+# ---------------------------------------------------------------------------
+# Ceremony artefacts and toxic waste.
+# Structural keys are reproducible from a transcript and are large; entropy must
+# never reach disk at all. Anything a ceremony writes stays local by default.
+# ---------------------------------------------------------------------------
+ceremony-out/
+demo-out/
+*-ceremony-out/
+toxic*
+*toxic*
+waste/
+contributions/
+*.ptau
+*.zkey
+proving_key.bin
+verifying_key.bin
+proof.bin
+public_inputs.txt
+commitment.json
+transcript.json
+*_digest.hex
+vk_digest.hex
+
+# ---------------------------------------------------------------------------
+# State, logs, and scratch output.
+# ---------------------------------------------------------------------------
+*.log
+logs/
+*.pid
+*.seed.json
+state/
+.state
+*.sqlite
+*.sqlite3
+*.db
+tmp/
+temp/
+scratch/
+out/
+
+# ---------------------------------------------------------------------------
+# Rust.
+# Cargo.lock is intentionally NOT ignored: this workspace ships binaries, and a
+# committed lockfile is what makes a judge's build byte-for-byte reproducible.
+# ---------------------------------------------------------------------------
+target/
+**/*.rs.bk
+*.pdb
+.cargo/config.toml
+
+# ---------------------------------------------------------------------------
+# Node and TypeScript.
+# ---------------------------------------------------------------------------
+node_modules/
+dist/
+build/
+coverage/
+.npm
+.yarn/
+.pnp.*
+*.tsbuildinfo
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---------------------------------------------------------------------------
+# Editors and operating systems.
+# ---------------------------------------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+!.vscode/extensions.json
+*.swp
+*.swo
+*~
+.claude/
