@@ -176,14 +176,28 @@ tvc audit   --setup ceremony-out                   # re-derive digest from the k
 
 ### Publishing to Nostr
 
+A commitment must exist before it can be broadcast. `tvc demo` writes one to
+`demo-out/honest/commitment.json` and prints the throwaway key that signed it;
+the operator flow above writes one to `ceremony-out/commitment.json`. Either works.
+
 ```bash
 cd nostr-bridge && npm install
 
-npm run broadcast -- --commitment ../ceremony-out/commitment.json   # dry run, no network
+# after `tvc demo` — it prints the matching export line for you
+export TVC_SECRET_KEY=<the key tvc demo printed>
+npm run broadcast -- --commitment ../demo-out/honest/commitment.json
+
+# after the operator flow, using your real ceremony key
+npm run broadcast -- --commitment ../ceremony-out/commitment.json        # dry run
 npm run broadcast -- --commitment ../ceremony-out/commitment.json --live
 
 npm run fetch -- --address acme-llm-7b:2026.09 --author <consortium-pubkey>
 ```
+
+`TVC_SECRET_KEY` must be the **same key** that signed the commitment, so the Nostr
+event and the BIP-340 signature inside it resolve to one identity. Without it the
+bridge generates an ephemeral key, still produces a valid event, and warns that a
+wallet pinned to the ceremony key will ignore it.
 
 `broadcast` **simulates by default** and prints the exact wire payload. `--live` is required to touch a relay, and it refuses to publish if the Nostr key does not match the BIP-340 signer inside the commitment — publishing a commitment from an identity a wallet is not pinned to is a silent no-op, so the tool treats it as an error rather than letting you believe you shipped.
 

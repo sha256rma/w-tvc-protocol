@@ -45,7 +45,7 @@ wallet.dat
 # never reach disk at all. Anything a ceremony writes stays local by default.
 # ---------------------------------------------------------------------------
 ceremony-out/
-demo-out/
+demo-out*/
 *-ceremony-out/
 toxic*
 *toxic*

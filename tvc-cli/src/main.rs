@@ -29,7 +29,7 @@ use tvc_core::hex;
 use tvc_core::{
     derive_vk_digest, field_from_u64, prove_inference, run_ceremony, verify_inference,
     CeremonyOutput, InferenceProof, ModelDescriptor, ParameterCommitment, ParticipantContribution,
-    NOSTR_COMMITMENT_KIND, PROTOCOL_VERSION, SCHEME_TAG,
+    SignedCommitment, NOSTR_COMMITMENT_KIND, PROTOCOL_VERSION, SCHEME_TAG,
 };
 
 const SECRET_KEY_VAR: &str = "TVC_SECRET_KEY";
@@ -206,22 +206,7 @@ fn commit(setup: &Path) -> Result<(), String> {
         .map_err(describe)?;
     signed.verify().map_err(describe)?;
 
-    let payload = Json::obj(vec![
-        ("protocol", Json::s(PROTOCOL_VERSION)),
-        ("kind", Json::Num(u64::from(NOSTR_COMMITMENT_KIND))),
-        ("address", Json::s(signed.commitment.address())),
-        ("model_id", Json::s(&signed.commitment.model_id)),
-        ("version", Json::s(&signed.commitment.version)),
-        ("scheme", Json::s(&signed.commitment.scheme)),
-        ("vk_digest", Json::s(hex::encode(&signed.commitment.vk_digest))),
-        ("transcript_digest", Json::s(hex::encode(&signed.commitment.transcript_digest))),
-        ("burn_digest", Json::s(hex::encode(&signed.commitment.burn_digest))),
-        ("signer", Json::s(signed.signer_hex())),
-        ("signature", Json::s(signed.signature_hex())),
-    ]);
-
-    let path = setup.join("commitment.json");
-    fs::write(&path, format!("{}\n", payload.render(0))).map_err(|error| error.to_string())?;
+    let path = write_commitment(setup, &signed)?;
 
     println!("Signed parameter commitment");
     println!("  address    {}", signed.commitment.address());
@@ -315,6 +300,20 @@ fn demo(out: &Path) -> Result<(), String> {
     println!("  transcript chain  {}", if honest.transcript.verify_chain() { "verified" } else { "BROKEN" });
     println!("  entropy burned    {} bytes", honest.burn.burned_bytes);
 
+    let demo_key = os_entropy()?;
+    let signed = ParameterCommitment::new(
+        "acme-llm-7b",
+        "2026.09",
+        honest.vk_digest,
+        honest.transcript.final_digest,
+        honest.burn.attestation_digest,
+    )
+    .sign(&demo_key, &os_entropy()?)
+    .map_err(describe)?;
+    signed.verify().map_err(describe)?;
+    let commitment_path = write_commitment(&honest_dir, &signed)?;
+    println!("  signed by         {} (ephemeral demo key)", signed.signer_hex());
+
     println!();
     println!("== Phase 2: honest runtime inference ==");
     let honest_proof = prove_inference(
@@ -374,6 +373,17 @@ fn demo(out: &Path) -> Result<(), String> {
             println!();
             println!("  A valid proof about the wrong model is still refused, because the");
             println!("  commitment is checked before the proof. This is the downgrade defence.");
+            println!();
+            println!("== Next: publish the commitment to Nostr ==");
+            println!("  The demo signed with a throwaway key. Hand the same key to the bridge so");
+            println!("  the Nostr identity matches the commitment signer, then broadcast:");
+            println!();
+            println!("    export TVC_SECRET_KEY={}", hex::encode(&demo_key));
+            println!("    cd nostr-bridge && npm install");
+            println!("    npm run broadcast -- --commitment ../{}", commitment_path.display());
+            println!();
+            println!("  That is a demo key with no value. A real ceremony key never leaves");
+            println!("  the environment and is never printed.");
             Ok(())
         }
         Err(other) => Err(format!("demo produced an unexpected failure: {}", describe(other))),
@@ -434,6 +444,26 @@ fn write_ceremony(out: &Path, output: &CeremonyOutput) -> Result<(), String> {
         ),
     ]);
     write_text(&out.join("transcript.json"), &transcript.render(0))
+}
+
+fn write_commitment(setup: &Path, signed: &SignedCommitment) -> Result<PathBuf, String> {
+    let payload = Json::obj(vec![
+        ("protocol", Json::s(PROTOCOL_VERSION)),
+        ("kind", Json::Num(u64::from(NOSTR_COMMITMENT_KIND))),
+        ("address", Json::s(signed.commitment.address())),
+        ("model_id", Json::s(&signed.commitment.model_id)),
+        ("version", Json::s(&signed.commitment.version)),
+        ("scheme", Json::s(&signed.commitment.scheme)),
+        ("vk_digest", Json::s(hex::encode(&signed.commitment.vk_digest))),
+        ("transcript_digest", Json::s(hex::encode(&signed.commitment.transcript_digest))),
+        ("burn_digest", Json::s(hex::encode(&signed.commitment.burn_digest))),
+        ("signer", Json::s(signed.signer_hex())),
+        ("signature", Json::s(signed.signature_hex())),
+    ]);
+    let path = setup.join("commitment.json");
+    fs::write(&path, format!("{}\n", payload.render(0)))
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    Ok(path)
 }
 
 fn write_proof(setup: &Path, proof: &InferenceProof) -> Result<(), String> {
