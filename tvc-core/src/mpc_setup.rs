@@ -59,6 +59,12 @@ use crate::digest::{
 use crate::error::{Result, TvcError};
 use crate::hex;
 
+/// Maximum length of a model identifier or version string.
+pub const IDENTIFIER_MAX_LEN: usize = 64;
+
+/// Maximum length of the free-form architecture description.
+pub const ARCHITECTURE_MAX_LEN: usize = 256;
+
 /// Identifier for the proving system these keys belong to.
 ///
 /// Absorbed into the verifying-key digest so a key from a different backend can
@@ -78,6 +84,84 @@ pub struct ModelDescriptor {
     pub parameter_count: u64,
 }
 
+/// Rejects identifiers that cannot survive the protocol's transports intact.
+///
+/// The permitted alphabet is ASCII alphanumerics plus `-`, `_` and `.`. Three
+/// characters are excluded for concrete reasons, not out of caution:
+///
+/// - **`:`** would make [`ModelDescriptor::address`] ambiguous. The address is
+///   `<model_id>:<version>` and becomes the Nostr `d` tag, so a colon inside a
+///   component means a consumer splitting on `:` recovers a different
+///   `(model, version)` pair than the one that was frozen.
+/// - **Newlines** would corrupt the line-delimited descriptor file that
+///   `tvc-cli` writes, letting a ceremony be signed under an identity that is
+///   not the identity it froze.
+/// - **Whitespace and control characters** would let two visually identical
+///   identifiers hash differently, or survive a `trim()` as a third value.
+///
+/// Rejecting at the boundary is cheaper than making every downstream consumer
+/// defensive, and a model identifier has no legitimate need for these bytes.
+pub fn validate_identifier(field: &'static str, value: &str) -> Result<()> {
+    if value.is_empty() {
+        return Err(TvcError::InvalidIdentifier {
+            field,
+            reason: "must not be empty".to_owned(),
+        });
+    }
+    if value.len() > IDENTIFIER_MAX_LEN {
+        return Err(TvcError::InvalidIdentifier {
+            field,
+            reason: format!("must be at most {IDENTIFIER_MAX_LEN} bytes, got {}", value.len()),
+        });
+    }
+    for character in value.chars() {
+        let permitted =
+            character.is_ascii_alphanumeric() || character == '-' || character == '_' || character == '.';
+        if !permitted {
+            return Err(TvcError::InvalidIdentifier {
+                field,
+                reason: format!(
+                    "{character:?} is not permitted; use ASCII letters, digits, '-', '_' or '.'"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Rejects free-form text that would corrupt the descriptor file or transcript.
+///
+/// Looser than [`validate_identifier`] because this field is prose, but control
+/// characters are still refused: they break the line-delimited descriptor file
+/// and render unpredictably in a transcript an auditor has to read.
+pub fn validate_freeform(field: &'static str, value: &str) -> Result<()> {
+    if value.is_empty() {
+        return Err(TvcError::InvalidIdentifier {
+            field,
+            reason: "must not be empty".to_owned(),
+        });
+    }
+    if value.len() > ARCHITECTURE_MAX_LEN {
+        return Err(TvcError::InvalidIdentifier {
+            field,
+            reason: format!("must be at most {ARCHITECTURE_MAX_LEN} bytes, got {}", value.len()),
+        });
+    }
+    if let Some(character) = value.chars().find(|c| c.is_control()) {
+        return Err(TvcError::InvalidIdentifier {
+            field,
+            reason: format!("control character {character:?} is not permitted"),
+        });
+    }
+    if value.trim() != value {
+        return Err(TvcError::InvalidIdentifier {
+            field,
+            reason: "must not have leading or trailing whitespace".to_owned(),
+        });
+    }
+    Ok(())
+}
+
 impl ModelDescriptor {
     /// Builds a descriptor.
     pub fn new(
@@ -92,6 +176,20 @@ impl ModelDescriptor {
             architecture: architecture.into(),
             parameter_count,
         }
+    }
+
+    /// Confirms every field is safe to transport and to write to disk.
+    ///
+    /// Called by [`run_ceremony`], so an invalid descriptor can be constructed
+    /// but can never be frozen into a verifying key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TvcError::InvalidIdentifier`] naming the offending field.
+    pub fn validate(&self) -> Result<()> {
+        validate_identifier("model_id", &self.model_id)?;
+        validate_identifier("version", &self.version)?;
+        validate_freeform("architecture", &self.architecture)
     }
 
     /// Addressable identity of this model version.
@@ -269,6 +367,8 @@ pub fn run_ceremony(
     model: ModelDescriptor,
     contributions: Vec<ParticipantContribution>,
 ) -> Result<CeremonyOutput> {
+    model.validate()?;
+
     if contributions.is_empty() {
         return Err(TvcError::EmptyCeremony);
     }
@@ -452,6 +552,66 @@ mod tests {
         assert_eq!(output.burn.contributions, 3);
         assert_eq!(output.burn.vk_digest, output.vk_digest);
         assert_eq!(output.burn.transcript_digest, output.transcript.final_digest);
+    }
+
+    #[test]
+    fn colon_in_an_identifier_is_rejected() {
+        let ambiguous = ModelDescriptor::new("acme:llm", "2026.09", "affine", 1);
+        assert!(matches!(
+            ambiguous.validate().unwrap_err(),
+            TvcError::InvalidIdentifier { field: "model_id", .. }
+        ));
+        assert!(matches!(
+            run_ceremony(ambiguous, contributions()).unwrap_err(),
+            TvcError::InvalidIdentifier { .. }
+        ));
+    }
+
+    #[test]
+    fn newline_in_an_identifier_is_rejected() {
+        let corrupting = ModelDescriptor::new("bad\nid", "1", "affine", 1);
+        assert!(matches!(
+            corrupting.validate().unwrap_err(),
+            TvcError::InvalidIdentifier { field: "model_id", .. }
+        ));
+    }
+
+    #[test]
+    fn whitespace_and_control_characters_are_rejected() {
+        for bad in ["has space", " lead", "trail ", "tab\there", "null\0byte"] {
+            assert!(
+                validate_identifier("model_id", bad).is_err(),
+                "expected {bad:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_and_overlong_identifiers_are_rejected() {
+        assert!(validate_identifier("version", "").is_err());
+        assert!(validate_identifier("version", &"v".repeat(IDENTIFIER_MAX_LEN + 1)).is_err());
+        assert!(validate_identifier("version", &"v".repeat(IDENTIFIER_MAX_LEN)).is_ok());
+    }
+
+    #[test]
+    fn realistic_identifiers_are_accepted() {
+        for good in ["acme-llm-7b", "2026.09", "model_v2", "a", "gpt-4.1-turbo"] {
+            assert!(validate_identifier("model_id", good).is_ok(), "expected {good:?} to pass");
+        }
+    }
+
+    #[test]
+    fn architecture_rejects_control_characters_but_allows_prose() {
+        assert!(validate_freeform("architecture", "affine committed inference").is_ok());
+        assert!(validate_freeform("architecture", "two\nlines").is_err());
+        assert!(validate_freeform("architecture", " padded ").is_err());
+    }
+
+    #[test]
+    fn binding_digest_detects_identity_drift() {
+        let frozen = ModelDescriptor::new("acme-llm-7b", "2026.09", "affine", 7_000_000_000);
+        let drifted = ModelDescriptor::new("acme-llm-7b", "2026.10", "affine", 7_000_000_000);
+        assert_ne!(frozen.binding_digest(), drifted.binding_digest());
     }
 
     #[test]

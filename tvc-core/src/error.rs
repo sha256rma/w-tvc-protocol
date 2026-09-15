@@ -53,6 +53,20 @@ pub enum TvcError {
     Signature(String),
     /// The BIP-340 signature over a parameter commitment did not verify.
     CommitmentUnsigned,
+    /// A model identifier contained a character that is unsafe to transport.
+    InvalidIdentifier {
+        /// Which descriptor field was rejected.
+        field: &'static str,
+        /// Why it was rejected.
+        reason: String,
+    },
+    /// Ceremony artefacts describe a different model than the one they froze.
+    ModelBindingMismatch {
+        /// Binding digest recorded by the ceremony.
+        expected: String,
+        /// Binding digest recomputed from the descriptor read back from disk.
+        observed: String,
+    },
 }
 
 impl fmt::Display for TvcError {
@@ -81,6 +95,13 @@ impl fmt::Display for TvcError {
             Self::CommitmentUnsigned => {
                 write!(f, "BIP-340 signature over parameter commitment did not verify")
             }
+            Self::InvalidIdentifier { field, reason } => {
+                write!(f, "invalid model {field}: {reason}")
+            }
+            Self::ModelBindingMismatch { expected, observed } => write!(
+                f,
+                "model binding mismatch: ceremony froze {expected}, descriptor on disk yields {observed}"
+            ),
         }
     }
 }

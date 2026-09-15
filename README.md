@@ -131,7 +131,7 @@ The entropy that could forge proofs is destroyed before the ceremony process exi
 ```bash
 git clone <your-remote> && cd w-tvc-protocol
 
-cargo test --workspace          # 34 Rust tests
+cargo test --workspace          # 41 Rust tests
 cargo build --release
 ./target/release/tvc demo       # full lifecycle + a caught forgery
 ```
@@ -219,7 +219,7 @@ Both phases are implemented and tested end to end, across two languages, with th
 |---|---|
 | Rust | 2,431 lines across `tvc-core` + `tvc-cli` |
 | TypeScript | 563 lines in `nostr-bridge` |
-| Tests | 33 Rust unit + 1 doctest + 8 TypeScript = **42 passing** |
+| Tests | 40 Rust unit + 1 doctest + 8 TypeScript = **49 passing** |
 | Warnings | zero (`missing_docs = "deny"`, `unsafe_code = "forbid"`) |
 | Dependencies | 10 direct Rust crates, 1 runtime npm package |
 
@@ -287,6 +287,7 @@ Stated plainly, because a protocol that asks to be trusted should not have to be
 | A ceremony operator who retains the combined entropy | The Phase-2 MPC upgrade above. Today's mitigation is an auditable transcript and an ephemeral ceremony machine. |
 | Register and stack residue during setup | `arkworks` copies field elements internally, outside any destructor's reach. Run the ceremony on a machine you destroy afterwards. |
 | Swap, hibernation, core dumps | Disable both for the ceremony process. `panic = "abort"` means destructors do not run on panic, so core-dump hygiene is what covers that path. |
+| Descriptor tampering between `ceremony` and `commit` | Caught. The recorded model-binding digest is recomputed at signing time and must match. |
 | A model whose *weights* change without a new ceremony | Out of scope by construction. The circuit binds parameters to the commitment; binding the commitment to real-world model behaviour needs the production circuit. |
 | Kind 30200 is addressable, so a later event replaces an earlier one | A deliberate trade for lookup by `model:version`. `npm run fetch` warns when relays serve divergent digests for one address. Wallets should pin the digest on first use. |
 
@@ -349,6 +350,18 @@ The BIP-340 signature is over a tagged sighash of the commitment fields, **indep
 - **Tagged hashing everywhere.** Every digest is domain-separated with a BIP-340 tagged hash, and every message part is length-prefixed. Plain concatenation is ambiguous — `("ab","c")` and `("a","bc")` collide — which would let a participant identifier absorb adjacent bytes and forge a transcript entry.
 - **The digest is a pure function of the key.** Model metadata is *not* mixed in. A wallet recomputes the digest from the key it was handed and nothing else; binding key to claimed model identity is the signature's job. Separating them means the arithmetic check needs no metadata.
 - **Signing key from the environment, aux randomness passed explicitly.** The signing path has no hidden entropy source, which makes it reproducible under test and auditable in production.
+- **Model identifiers are validated at the boundary.** `model_id` and `version`
+  accept only ASCII alphanumerics plus `-`, `_` and `.`. Three exclusions have
+  concrete reasons: a `:` would make the `<model_id>:<version>` address ambiguous,
+  so a wallet splitting the Nostr `d` tag would recover a different pair than was
+  frozen; a newline would corrupt the line-delimited descriptor file, letting a
+  ceremony be signed under an identity it never froze; whitespace and control
+  characters let two identical-looking identifiers hash differently. Rejecting at
+  the boundary is cheaper than making every consumer defensive.
+- **The commitment is bound to the ceremony, not to a text file.** `tvc ceremony`
+  records a digest over the full descriptor, and `tvc commit` recomputes it from
+  what it read back and refuses to sign on mismatch. Identity cannot drift between
+  freezing a key and signing the claim about it, whatever the cause.
 - **Ten Rust dependencies, one npm runtime dependency.** Hex and JSON are ~40 auditable lines each rather than transitive trees, because they sit on the trust boundary.
 
 ## Roadmap

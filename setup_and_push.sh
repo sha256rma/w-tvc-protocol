@@ -161,7 +161,7 @@ The entropy that could forge proofs is destroyed before the ceremony process exi
 ```bash
 git clone <your-remote> && cd w-tvc-protocol
 
-cargo test --workspace          # 34 Rust tests
+cargo test --workspace          # 41 Rust tests
 cargo build --release
 ./target/release/tvc demo       # full lifecycle + a caught forgery
 ```
@@ -249,7 +249,7 @@ Both phases are implemented and tested end to end, across two languages, with th
 |---|---|
 | Rust | 2,431 lines across `tvc-core` + `tvc-cli` |
 | TypeScript | 563 lines in `nostr-bridge` |
-| Tests | 33 Rust unit + 1 doctest + 8 TypeScript = **42 passing** |
+| Tests | 40 Rust unit + 1 doctest + 8 TypeScript = **49 passing** |
 | Warnings | zero (`missing_docs = "deny"`, `unsafe_code = "forbid"`) |
 | Dependencies | 10 direct Rust crates, 1 runtime npm package |
 
@@ -317,6 +317,7 @@ Stated plainly, because a protocol that asks to be trusted should not have to be
 | A ceremony operator who retains the combined entropy | The Phase-2 MPC upgrade above. Today's mitigation is an auditable transcript and an ephemeral ceremony machine. |
 | Register and stack residue during setup | `arkworks` copies field elements internally, outside any destructor's reach. Run the ceremony on a machine you destroy afterwards. |
 | Swap, hibernation, core dumps | Disable both for the ceremony process. `panic = "abort"` means destructors do not run on panic, so core-dump hygiene is what covers that path. |
+| Descriptor tampering between `ceremony` and `commit` | Caught. The recorded model-binding digest is recomputed at signing time and must match. |
 | A model whose *weights* change without a new ceremony | Out of scope by construction. The circuit binds parameters to the commitment; binding the commitment to real-world model behaviour needs the production circuit. |
 | Kind 30200 is addressable, so a later event replaces an earlier one | A deliberate trade for lookup by `model:version`. `npm run fetch` warns when relays serve divergent digests for one address. Wallets should pin the digest on first use. |
 
@@ -379,6 +380,18 @@ The BIP-340 signature is over a tagged sighash of the commitment fields, **indep
 - **Tagged hashing everywhere.** Every digest is domain-separated with a BIP-340 tagged hash, and every message part is length-prefixed. Plain concatenation is ambiguous — `("ab","c")` and `("a","bc")` collide — which would let a participant identifier absorb adjacent bytes and forge a transcript entry.
 - **The digest is a pure function of the key.** Model metadata is *not* mixed in. A wallet recomputes the digest from the key it was handed and nothing else; binding key to claimed model identity is the signature's job. Separating them means the arithmetic check needs no metadata.
 - **Signing key from the environment, aux randomness passed explicitly.** The signing path has no hidden entropy source, which makes it reproducible under test and auditable in production.
+- **Model identifiers are validated at the boundary.** `model_id` and `version`
+  accept only ASCII alphanumerics plus `-`, `_` and `.`. Three exclusions have
+  concrete reasons: a `:` would make the `<model_id>:<version>` address ambiguous,
+  so a wallet splitting the Nostr `d` tag would recover a different pair than was
+  frozen; a newline would corrupt the line-delimited descriptor file, letting a
+  ceremony be signed under an identity it never froze; whitespace and control
+  characters let two identical-looking identifiers hash differently. Rejecting at
+  the boundary is cheaper than making every consumer defensive.
+- **The commitment is bound to the ceremony, not to a text file.** `tvc ceremony`
+  records a digest over the full descriptor, and `tvc commit` recomputes it from
+  what it read back and refuses to sign on mismatch. Identity cannot drift between
+  freezing a key and signing the claim about it, whatever the cause.
 - **Ten Rust dependencies, one npm runtime dependency.** Hex and JSON are ~40 auditable lines each rather than transitive trees, because they sit on the trust boundary.
 
 ## Roadmap
@@ -1878,6 +1891,12 @@ use crate::digest::{
 use crate::error::{Result, TvcError};
 use crate::hex;
 
+/// Maximum length of a model identifier or version string.
+pub const IDENTIFIER_MAX_LEN: usize = 64;
+
+/// Maximum length of the free-form architecture description.
+pub const ARCHITECTURE_MAX_LEN: usize = 256;
+
 /// Identifier for the proving system these keys belong to.
 ///
 /// Absorbed into the verifying-key digest so a key from a different backend can
@@ -1897,6 +1916,84 @@ pub struct ModelDescriptor {
     pub parameter_count: u64,
 }
 
+/// Rejects identifiers that cannot survive the protocol's transports intact.
+///
+/// The permitted alphabet is ASCII alphanumerics plus `-`, `_` and `.`. Three
+/// characters are excluded for concrete reasons, not out of caution:
+///
+/// - **`:`** would make [`ModelDescriptor::address`] ambiguous. The address is
+///   `<model_id>:<version>` and becomes the Nostr `d` tag, so a colon inside a
+///   component means a consumer splitting on `:` recovers a different
+///   `(model, version)` pair than the one that was frozen.
+/// - **Newlines** would corrupt the line-delimited descriptor file that
+///   `tvc-cli` writes, letting a ceremony be signed under an identity that is
+///   not the identity it froze.
+/// - **Whitespace and control characters** would let two visually identical
+///   identifiers hash differently, or survive a `trim()` as a third value.
+///
+/// Rejecting at the boundary is cheaper than making every downstream consumer
+/// defensive, and a model identifier has no legitimate need for these bytes.
+pub fn validate_identifier(field: &'static str, value: &str) -> Result<()> {
+    if value.is_empty() {
+        return Err(TvcError::InvalidIdentifier {
+            field,
+            reason: "must not be empty".to_owned(),
+        });
+    }
+    if value.len() > IDENTIFIER_MAX_LEN {
+        return Err(TvcError::InvalidIdentifier {
+            field,
+            reason: format!("must be at most {IDENTIFIER_MAX_LEN} bytes, got {}", value.len()),
+        });
+    }
+    for character in value.chars() {
+        let permitted =
+            character.is_ascii_alphanumeric() || character == '-' || character == '_' || character == '.';
+        if !permitted {
+            return Err(TvcError::InvalidIdentifier {
+                field,
+                reason: format!(
+                    "{character:?} is not permitted; use ASCII letters, digits, '-', '_' or '.'"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Rejects free-form text that would corrupt the descriptor file or transcript.
+///
+/// Looser than [`validate_identifier`] because this field is prose, but control
+/// characters are still refused: they break the line-delimited descriptor file
+/// and render unpredictably in a transcript an auditor has to read.
+pub fn validate_freeform(field: &'static str, value: &str) -> Result<()> {
+    if value.is_empty() {
+        return Err(TvcError::InvalidIdentifier {
+            field,
+            reason: "must not be empty".to_owned(),
+        });
+    }
+    if value.len() > ARCHITECTURE_MAX_LEN {
+        return Err(TvcError::InvalidIdentifier {
+            field,
+            reason: format!("must be at most {ARCHITECTURE_MAX_LEN} bytes, got {}", value.len()),
+        });
+    }
+    if let Some(character) = value.chars().find(|c| c.is_control()) {
+        return Err(TvcError::InvalidIdentifier {
+            field,
+            reason: format!("control character {character:?} is not permitted"),
+        });
+    }
+    if value.trim() != value {
+        return Err(TvcError::InvalidIdentifier {
+            field,
+            reason: "must not have leading or trailing whitespace".to_owned(),
+        });
+    }
+    Ok(())
+}
+
 impl ModelDescriptor {
     /// Builds a descriptor.
     pub fn new(
@@ -1911,6 +2008,20 @@ impl ModelDescriptor {
             architecture: architecture.into(),
             parameter_count,
         }
+    }
+
+    /// Confirms every field is safe to transport and to write to disk.
+    ///
+    /// Called by [`run_ceremony`], so an invalid descriptor can be constructed
+    /// but can never be frozen into a verifying key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TvcError::InvalidIdentifier`] naming the offending field.
+    pub fn validate(&self) -> Result<()> {
+        validate_identifier("model_id", &self.model_id)?;
+        validate_identifier("version", &self.version)?;
+        validate_freeform("architecture", &self.architecture)
     }
 
     /// Addressable identity of this model version.
@@ -2088,6 +2199,8 @@ pub fn run_ceremony(
     model: ModelDescriptor,
     contributions: Vec<ParticipantContribution>,
 ) -> Result<CeremonyOutput> {
+    model.validate()?;
+
     if contributions.is_empty() {
         return Err(TvcError::EmptyCeremony);
     }
@@ -2271,6 +2384,66 @@ mod tests {
         assert_eq!(output.burn.contributions, 3);
         assert_eq!(output.burn.vk_digest, output.vk_digest);
         assert_eq!(output.burn.transcript_digest, output.transcript.final_digest);
+    }
+
+    #[test]
+    fn colon_in_an_identifier_is_rejected() {
+        let ambiguous = ModelDescriptor::new("acme:llm", "2026.09", "affine", 1);
+        assert!(matches!(
+            ambiguous.validate().unwrap_err(),
+            TvcError::InvalidIdentifier { field: "model_id", .. }
+        ));
+        assert!(matches!(
+            run_ceremony(ambiguous, contributions()).unwrap_err(),
+            TvcError::InvalidIdentifier { .. }
+        ));
+    }
+
+    #[test]
+    fn newline_in_an_identifier_is_rejected() {
+        let corrupting = ModelDescriptor::new("bad\nid", "1", "affine", 1);
+        assert!(matches!(
+            corrupting.validate().unwrap_err(),
+            TvcError::InvalidIdentifier { field: "model_id", .. }
+        ));
+    }
+
+    #[test]
+    fn whitespace_and_control_characters_are_rejected() {
+        for bad in ["has space", " lead", "trail ", "tab\there", "null\0byte"] {
+            assert!(
+                validate_identifier("model_id", bad).is_err(),
+                "expected {bad:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_and_overlong_identifiers_are_rejected() {
+        assert!(validate_identifier("version", "").is_err());
+        assert!(validate_identifier("version", &"v".repeat(IDENTIFIER_MAX_LEN + 1)).is_err());
+        assert!(validate_identifier("version", &"v".repeat(IDENTIFIER_MAX_LEN)).is_ok());
+    }
+
+    #[test]
+    fn realistic_identifiers_are_accepted() {
+        for good in ["acme-llm-7b", "2026.09", "model_v2", "a", "gpt-4.1-turbo"] {
+            assert!(validate_identifier("model_id", good).is_ok(), "expected {good:?} to pass");
+        }
+    }
+
+    #[test]
+    fn architecture_rejects_control_characters_but_allows_prose() {
+        assert!(validate_freeform("architecture", "affine committed inference").is_ok());
+        assert!(validate_freeform("architecture", "two\nlines").is_err());
+        assert!(validate_freeform("architecture", " padded ").is_err());
+    }
+
+    #[test]
+    fn binding_digest_detects_identity_drift() {
+        let frozen = ModelDescriptor::new("acme-llm-7b", "2026.09", "affine", 7_000_000_000);
+        let drifted = ModelDescriptor::new("acme-llm-7b", "2026.10", "affine", 7_000_000_000);
+        assert_ne!(frozen.binding_digest(), drifted.binding_digest());
     }
 
     #[test]
@@ -3281,6 +3454,20 @@ pub enum TvcError {
     Signature(String),
     /// The BIP-340 signature over a parameter commitment did not verify.
     CommitmentUnsigned,
+    /// A model identifier contained a character that is unsafe to transport.
+    InvalidIdentifier {
+        /// Which descriptor field was rejected.
+        field: &'static str,
+        /// Why it was rejected.
+        reason: String,
+    },
+    /// Ceremony artefacts describe a different model than the one they froze.
+    ModelBindingMismatch {
+        /// Binding digest recorded by the ceremony.
+        expected: String,
+        /// Binding digest recomputed from the descriptor read back from disk.
+        observed: String,
+    },
 }
 
 impl fmt::Display for TvcError {
@@ -3309,6 +3496,13 @@ impl fmt::Display for TvcError {
             Self::CommitmentUnsigned => {
                 write!(f, "BIP-340 signature over parameter commitment did not verify")
             }
+            Self::InvalidIdentifier { field, reason } => {
+                write!(f, "invalid model {field}: {reason}")
+            }
+            Self::ModelBindingMismatch { expected, observed } => write!(
+                f,
+                "model binding mismatch: ceremony froze {expected}, descriptor on disk yields {observed}"
+            ),
         }
     }
 }
@@ -3528,6 +3722,7 @@ fn ceremony(
     out: &Path,
 ) -> Result<(), String> {
     let model = ModelDescriptor::new(model_id, version, architecture, parameters);
+    model.validate().map_err(describe)?;
 
     let mut contributions = Vec::with_capacity(participants.len());
     for participant in participants {
@@ -3555,14 +3750,15 @@ fn ceremony(
 
 fn commit(setup: &Path) -> Result<(), String> {
     let descriptor = read_descriptor(setup)?;
+    verify_model_binding(setup, &descriptor)?;
     let vk_digest = read_digest(&setup.join("vk_digest.hex"))?;
     let transcript_digest = read_digest(&setup.join("transcript_digest.hex"))?;
     let burn_digest = read_digest(&setup.join("burn_digest.hex"))?;
 
     let secret_key = read_secret_key()?;
     let commitment = ParameterCommitment::new(
-        descriptor.0.clone(),
-        descriptor.1.clone(),
+        descriptor.model_id.clone(),
+        descriptor.version.clone(),
         vk_digest,
         transcript_digest,
         burn_digest,
@@ -3765,6 +3961,10 @@ fn write_ceremony(out: &Path, output: &CeremonyOutput) -> Result<(), String> {
     write_text(&out.join("transcript_digest.hex"), &output.transcript_digest_hex())?;
     write_text(&out.join("burn_digest.hex"), &output.burn.attestation_hex())?;
     write_text(
+        &out.join("model_binding.hex"),
+        &hex::encode(&output.transcript.model.binding_digest()),
+    )?;
+    write_text(
         &out.join("model.txt"),
         &format!(
             "{}\n{}\n{}\n{}",
@@ -3850,16 +4050,45 @@ fn read_public_inputs(path: &Path) -> Result<Vec<Fr>, String> {
     InferenceProof::public_inputs_from_hex(&values).map_err(describe)
 }
 
-fn read_descriptor(setup: &Path) -> Result<(String, String), String> {
+fn read_descriptor(setup: &Path) -> Result<ModelDescriptor, String> {
     let path = setup.join("model.txt");
     let text = fs::read_to_string(&path).map_err(|error| format!("{}: {error}", path.display()))?;
-    let mut lines = text.lines();
-    let model_id = lines.next().unwrap_or_default().trim().to_owned();
-    let version = lines.next().unwrap_or_default().trim().to_owned();
-    if model_id.is_empty() || version.is_empty() {
-        return Err(format!("{} is malformed", path.display()));
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() < 4 {
+        return Err(format!(
+            "{} is malformed: expected 4 lines, found {}",
+            path.display(),
+            lines.len()
+        ));
     }
-    Ok((model_id, version))
+    let parameter_count = lines[3]
+        .trim()
+        .parse::<u64>()
+        .map_err(|error| format!("{}: parameter count is not a number: {error}", path.display()))?;
+
+    let descriptor = ModelDescriptor::new(
+        lines[0].trim(),
+        lines[1].trim(),
+        lines[2].trim(),
+        parameter_count,
+    );
+    descriptor.validate().map_err(describe)?;
+    Ok(descriptor)
+}
+
+fn verify_model_binding(setup: &Path, descriptor: &ModelDescriptor) -> Result<(), String> {
+    let path = setup.join("model_binding.hex");
+    let recorded = read_digest(&path).map_err(|error| {
+        format!("{error}\n  This ceremony predates model-binding checks. Re-run `tvc ceremony`.")
+    })?;
+    let recomputed = descriptor.binding_digest();
+    if recorded != recomputed {
+        return Err(describe(TvcError::ModelBindingMismatch {
+            expected: hex::encode(&recorded),
+            observed: hex::encode(&recomputed),
+        }));
+    }
+    Ok(())
 }
 
 fn read_digest(path: &Path) -> Result<[u8; 32], String> {

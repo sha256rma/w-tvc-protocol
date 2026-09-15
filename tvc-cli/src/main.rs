@@ -162,6 +162,7 @@ fn ceremony(
     out: &Path,
 ) -> Result<(), String> {
     let model = ModelDescriptor::new(model_id, version, architecture, parameters);
+    model.validate().map_err(describe)?;
 
     let mut contributions = Vec::with_capacity(participants.len());
     for participant in participants {
@@ -189,14 +190,15 @@ fn ceremony(
 
 fn commit(setup: &Path) -> Result<(), String> {
     let descriptor = read_descriptor(setup)?;
+    verify_model_binding(setup, &descriptor)?;
     let vk_digest = read_digest(&setup.join("vk_digest.hex"))?;
     let transcript_digest = read_digest(&setup.join("transcript_digest.hex"))?;
     let burn_digest = read_digest(&setup.join("burn_digest.hex"))?;
 
     let secret_key = read_secret_key()?;
     let commitment = ParameterCommitment::new(
-        descriptor.0.clone(),
-        descriptor.1.clone(),
+        descriptor.model_id.clone(),
+        descriptor.version.clone(),
         vk_digest,
         transcript_digest,
         burn_digest,
@@ -399,6 +401,10 @@ fn write_ceremony(out: &Path, output: &CeremonyOutput) -> Result<(), String> {
     write_text(&out.join("transcript_digest.hex"), &output.transcript_digest_hex())?;
     write_text(&out.join("burn_digest.hex"), &output.burn.attestation_hex())?;
     write_text(
+        &out.join("model_binding.hex"),
+        &hex::encode(&output.transcript.model.binding_digest()),
+    )?;
+    write_text(
         &out.join("model.txt"),
         &format!(
             "{}\n{}\n{}\n{}",
@@ -484,16 +490,45 @@ fn read_public_inputs(path: &Path) -> Result<Vec<Fr>, String> {
     InferenceProof::public_inputs_from_hex(&values).map_err(describe)
 }
 
-fn read_descriptor(setup: &Path) -> Result<(String, String), String> {
+fn read_descriptor(setup: &Path) -> Result<ModelDescriptor, String> {
     let path = setup.join("model.txt");
     let text = fs::read_to_string(&path).map_err(|error| format!("{}: {error}", path.display()))?;
-    let mut lines = text.lines();
-    let model_id = lines.next().unwrap_or_default().trim().to_owned();
-    let version = lines.next().unwrap_or_default().trim().to_owned();
-    if model_id.is_empty() || version.is_empty() {
-        return Err(format!("{} is malformed", path.display()));
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() < 4 {
+        return Err(format!(
+            "{} is malformed: expected 4 lines, found {}",
+            path.display(),
+            lines.len()
+        ));
     }
-    Ok((model_id, version))
+    let parameter_count = lines[3]
+        .trim()
+        .parse::<u64>()
+        .map_err(|error| format!("{}: parameter count is not a number: {error}", path.display()))?;
+
+    let descriptor = ModelDescriptor::new(
+        lines[0].trim(),
+        lines[1].trim(),
+        lines[2].trim(),
+        parameter_count,
+    );
+    descriptor.validate().map_err(describe)?;
+    Ok(descriptor)
+}
+
+fn verify_model_binding(setup: &Path, descriptor: &ModelDescriptor) -> Result<(), String> {
+    let path = setup.join("model_binding.hex");
+    let recorded = read_digest(&path).map_err(|error| {
+        format!("{error}\n  This ceremony predates model-binding checks. Re-run `tvc ceremony`.")
+    })?;
+    let recomputed = descriptor.binding_digest();
+    if recorded != recomputed {
+        return Err(describe(TvcError::ModelBindingMismatch {
+            expected: hex::encode(&recorded),
+            observed: hex::encode(&recomputed),
+        }));
+    }
+    Ok(())
 }
 
 fn read_digest(path: &Path) -> Result<[u8; 32], String> {
