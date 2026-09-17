@@ -1034,22 +1034,89 @@ impl VectorCommitment for MerkleVectorCommitment {
 // Protocol layer
 // ---------------------------------------------------------------------------
 
+/// One commitment under a named scheme.
+///
+/// The scheme name travels with the bytes and is absorbed into
+/// [`WeightCommitment::root`]. Without it, a 32-byte Poseidon root and a
+/// compressed BN254 `G1` point are both just 32 bytes, and a verifier handed one
+/// could be made to treat it as the other.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SchemeCommitment {
+    /// Identifier for the scheme, for example [`MERKLE_SCHEME_TAG`].
+    pub scheme: String,
+    /// The scheme's commitment, canonically encoded.
+    pub bytes: Vec<u8>,
+}
+
+impl SchemeCommitment {
+    /// Builds a scheme commitment.
+    pub fn new(scheme: impl Into<String>, bytes: Vec<u8>) -> Self {
+        Self {
+            scheme: scheme.into(),
+            bytes,
+        }
+    }
+
+    /// Lowercase hex rendering of [`Self::bytes`].
+    pub fn hex(&self) -> String {
+        hex::encode(&self.bytes)
+    }
+}
+
 /// A published weight commitment `C`.
 ///
 /// [`Self::root`] is the value that travels: it is what a publisher signs and
 /// what the registry stores. It is **always 32 bytes**, because it is always a
-/// tagged hash over the scheme's commitment rather than the scheme's commitment
-/// itself — which is what lets the scheme change without touching
-/// [`crate::signer`] or [`crate::registry`]. The remaining fields are the binding
-/// inputs, carried so an auditor can recompute the root rather than trust it.
+/// tagged hash over the scheme commitments rather than any of them directly —
+/// which is what lets the schemes change without touching [`crate::signer`] or
+/// [`crate::registry`].
+///
+/// # Why two commitments
+///
+/// They answer different questions and neither substitutes for the other.
+///
+/// [`Self::hash`] is hash-based and always present. Anyone holding the weights
+/// can recompute it on a laptop with no trusted setup. This is what serves
+/// open-weight models, auditors under NDA, and the publisher's own CI.
+///
+/// [`Self::proof`] is the proving system's own commitment, and is present only
+/// once a proving system has been chosen. It exists because a hash tree is the
+/// wrong object to check *inside* a circuit: verifying a SHA-256 Merkle root over
+/// `n` weights costs roughly `2n` compressions at tens of thousands of
+/// constraints each, which for a billion-parameter model is many orders of
+/// magnitude past feasible. A polynomial commitment is the same object the
+/// proving system already produces for its witness columns, so binding "these are
+/// the committed weights" costs almost nothing.
+///
+/// Both are folded into [`Self::root`] and therefore covered by one publisher
+/// signature. That is the point: the fast public identity and the in-circuit
+/// identity cannot drift apart, because one signature freezes both.
+///
+/// # What this does and does not buy
+///
+/// A commitment over weights nobody else holds gives **non-repudiation and
+/// consistency**, not correctness. The publisher is on record for a specific `C`,
+/// and once the proving layer exists every served inference must prove against
+/// that same `C` — so they cannot show one model to benchmarkers and serve
+/// another to customers. It never establishes that the committed weights are any
+/// good, and nothing here can.
+///
+/// # A trap worth naming
+///
+/// [`Self::fractional_bits`] is the arithmetic the commitment describes. A proof
+/// built against [`Self::proof`] is a proof about the *quantised* vector, so if
+/// the deployed model serves `bf16` while the commitment is at `2^-16`, the proof
+/// is about different arithmetic than the thing answering requests. For the
+/// closed-weights case the scale has to match the inference arithmetic, not the
+/// storage format.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WeightCommitment {
-    /// Scheme that produced this commitment, for example [`MERKLE_SCHEME_TAG`].
-    pub scheme: String,
     /// The 32-byte commitment `C`.
     pub root: [u8; 32],
-    /// The underlying scheme's own commitment, canonically encoded.
-    pub scheme_commitment: Vec<u8>,
+    /// Hash-based commitment over the weight vector. Always present.
+    pub hash: SchemeCommitment,
+    /// Proving-system commitment, once a proving system has been chosen.
+    pub proof: Option<SchemeCommitment>,
     /// Number of field elements committed.
     pub length: u64,
     /// Fixed-point scale the weights were quantised at.
@@ -1059,28 +1126,37 @@ pub struct WeightCommitment {
 }
 
 impl WeightCommitment {
-    /// Binds a scheme commitment to the metadata that gives it meaning.
+    /// Binds the scheme commitments to the metadata that gives them meaning.
     pub fn bind(
-        scheme: &str,
-        scheme_commitment: Vec<u8>,
+        hash: SchemeCommitment,
+        proof: Option<SchemeCommitment>,
         length: u64,
         fractional_bits: u32,
         manifest_digest: [u8; 32],
     ) -> Self {
         Self {
-            root: bind_root(
-                scheme,
-                &scheme_commitment,
-                length,
-                fractional_bits,
-                &manifest_digest,
-            ),
-            scheme: scheme.to_owned(),
-            scheme_commitment,
+            root: bind_root(&hash, proof.as_ref(), length, fractional_bits, &manifest_digest),
+            hash,
+            proof,
             length,
             fractional_bits,
             manifest_digest,
         }
+    }
+
+    /// Returns this commitment with a proving-system commitment attached.
+    ///
+    /// Recomputes [`Self::root`], so a commitment that has already been signed
+    /// cannot gain a proof commitment after the fact — the signature would stop
+    /// verifying. That is deliberate: one signature covers both or neither.
+    pub fn with_proof(self, proof: SchemeCommitment) -> Self {
+        Self::bind(
+            self.hash,
+            Some(proof),
+            self.length,
+            self.fractional_bits,
+            self.manifest_digest,
+        )
     }
 
     /// Lowercase hex rendering of [`Self::root`].
@@ -1088,14 +1164,19 @@ impl WeightCommitment {
         hex::encode(&self.root)
     }
 
+    /// Whether a proving-system commitment is attached.
+    pub fn has_proof_commitment(&self) -> bool {
+        self.proof.is_some()
+    }
+
     /// Recomputes the bound root from the carried inputs.
     ///
     /// An auditor calls this to confirm the published `C` really is the binding
-    /// of the scheme commitment, length, scale and manifest it claims to be.
+    /// of the scheme commitments, length, scale and manifest it claims to be.
     pub fn rebind(&self) -> [u8; 32] {
         bind_root(
-            &self.scheme,
-            &self.scheme_commitment,
+            &self.hash,
+            self.proof.as_ref(),
             self.length,
             self.fractional_bits,
             &self.manifest_digest,
@@ -1107,20 +1188,34 @@ impl WeightCommitment {
         self.rebind() == self.root
     }
 
+    /// Canonical encoding of every field this commitment binds.
+    ///
+    /// Absorbed by the registration sighash and the ledger record digest, so
+    /// that all three derive the identity of a commitment the same way.
+    pub fn binding_parts(&self) -> Vec<Vec<u8>> {
+        binding_parts(
+            &self.hash,
+            self.proof.as_ref(),
+            self.length,
+            self.fractional_bits,
+            &self.manifest_digest,
+        )
+    }
+
     /// Recovers the Merkle scheme commitment, for verifying openings.
     ///
     /// # Errors
     ///
-    /// Returns [`TvcError::OpeningRejected`] if this commitment was not produced
-    /// by [`MerkleVectorCommitment`] or its encoding is malformed.
+    /// Returns [`TvcError::OpeningRejected`] if the hash commitment was not
+    /// produced by [`MerkleVectorCommitment`] or its encoding is malformed.
     pub fn merkle_commitment(&self) -> Result<MerkleCommitment> {
-        if self.scheme != MERKLE_SCHEME_TAG || self.scheme_commitment.len() != 40 {
+        if self.hash.scheme != MERKLE_SCHEME_TAG || self.hash.bytes.len() != 40 {
             return Err(TvcError::OpeningRejected);
         }
         let mut tree_root = [0u8; 32];
-        tree_root.copy_from_slice(&self.scheme_commitment[..32]);
+        tree_root.copy_from_slice(&self.hash.bytes[..32]);
         let length = u64::from_be_bytes(
-            self.scheme_commitment[32..]
+            self.hash.bytes[32..]
                 .try_into()
                 .map_err(|_| TvcError::OpeningRejected)?,
         );
@@ -1131,23 +1226,53 @@ impl WeightCommitment {
     }
 }
 
+/// Canonical encoding of everything `C` binds, as absorbable parts.
+///
+/// One definition, used by [`bind_root`], by the registration sighash, and by the
+/// ledger record digest. Three hand-written copies of this encoding would be
+/// three chances for them to disagree about what a commitment *is*, and a
+/// disagreement between the signature and the anchor is exactly the class of bug
+/// this protocol exists to detect.
+///
+/// Presence of the proof commitment is a one-byte tag rather than "fold an empty
+/// slice when absent". Folding nothing would make `None` and `Some(empty)` hash
+/// identically — a verifier could not tell a registration that declined to commit
+/// to a proving system from one that committed to nothing under it.
+fn binding_parts(
+    hash: &SchemeCommitment,
+    proof: Option<&SchemeCommitment>,
+    length: u64,
+    fractional_bits: u32,
+    manifest_digest: &[u8; 32],
+) -> Vec<Vec<u8>> {
+    let mut parts: Vec<Vec<u8>> = vec![
+        hash.scheme.as_bytes().to_vec(),
+        hash.bytes.clone(),
+    ];
+    match proof {
+        Some(value) => {
+            parts.push(vec![1u8]);
+            parts.push(value.scheme.as_bytes().to_vec());
+            parts.push(value.bytes.clone());
+        }
+        None => parts.push(vec![0u8]),
+    }
+    parts.push(length.to_be_bytes().to_vec());
+    parts.push(fractional_bits.to_be_bytes().to_vec());
+    parts.push(manifest_digest.to_vec());
+    parts
+}
+
 fn bind_root(
-    scheme: &str,
-    scheme_commitment: &[u8],
+    hash: &SchemeCommitment,
+    proof: Option<&SchemeCommitment>,
     length: u64,
     fractional_bits: u32,
     manifest_digest: &[u8; 32],
 ) -> [u8; 32] {
-    tagged_hash(
-        DOMAIN_WEIGHT_ROOT,
-        &[
-            scheme.as_bytes(),
-            scheme_commitment,
-            &length.to_be_bytes(),
-            &fractional_bits.to_be_bytes(),
-            manifest_digest,
-        ],
-    )
+    let parts = binding_parts(hash, proof, length, fractional_bits, manifest_digest);
+    let refs: Vec<&[u8]> = parts.iter().map(Vec::as_slice).collect();
+    tagged_hash(DOMAIN_WEIGHT_ROOT, &refs)
 }
 
 /// Commits to a weight vector with the default Merkle scheme.
@@ -1156,10 +1281,34 @@ fn bind_root(
 ///
 /// Returns [`TvcError::EmptyWeights`] if the vector holds no elements.
 pub fn commit_weights(vector: &WeightVector) -> Result<WeightCommitment> {
+    commit_weights_with_proof(vector, None)
+}
+
+/// Commits to a weight vector, optionally attaching a proving-system commitment.
+///
+/// The proof commitment is supplied by the caller rather than computed here
+/// because producing it needs the proving system's setup and arithmetization,
+/// which this crate deliberately does not carry. What this crate guarantees is
+/// that it is bound into `C` and therefore covered by the publisher's signature.
+///
+/// It must be supplied *before* signing. Attaching one afterwards changes `C` and
+/// invalidates the signature, which is the intended behaviour: one signature
+/// covers both identities or neither.
+///
+/// # Errors
+///
+/// Returns [`TvcError::EmptyWeights`] if the vector holds no elements.
+pub fn commit_weights_with_proof(
+    vector: &WeightVector,
+    proof: Option<SchemeCommitment>,
+) -> Result<WeightCommitment> {
     let commitment = MerkleVectorCommitment::commit(&NoParams, vector.elements())?;
     Ok(WeightCommitment::bind(
-        MerkleVectorCommitment::scheme(),
-        MerkleVectorCommitment::commitment_bytes(&commitment),
+        SchemeCommitment::new(
+            MerkleVectorCommitment::scheme(),
+            MerkleVectorCommitment::commitment_bytes(&commitment),
+        ),
+        proof,
         vector.len() as u64,
         vector.fractional_bits(),
         vector.manifest_digest(),
@@ -1487,8 +1636,20 @@ mod tests {
     #[test]
     fn the_bound_root_is_32_bytes_whatever_the_scheme_commitment_is() {
         // The property that keeps signer.rs and registry.rs scheme-agnostic.
-        let short = WeightCommitment::bind("toy/1", vec![0u8; 1], 1, 16, [0u8; 32]);
-        let long = WeightCommitment::bind("toy/1", vec![0u8; 96], 1, 16, [0u8; 32]);
+        let short = WeightCommitment::bind(
+            SchemeCommitment::new("toy/1", vec![0u8; 1]),
+            None,
+            1,
+            16,
+            [0u8; 32],
+        );
+        let long = WeightCommitment::bind(
+            SchemeCommitment::new("toy/1", vec![0u8; 96]),
+            None,
+            1,
+            16,
+            [0u8; 32],
+        );
         assert_eq!(short.root.len(), 32);
         assert_eq!(long.root.len(), 32);
         assert_ne!(short.root, long.root);
@@ -1497,8 +1658,80 @@ mod tests {
 
     #[test]
     fn a_foreign_scheme_cannot_be_opened_as_merkle() {
-        let foreign = WeightCommitment::bind("kzg-bn254/1", vec![0u8; 32], 4, 16, [0u8; 32]);
+        let foreign = WeightCommitment::bind(
+            SchemeCommitment::new("kzg-bn254/1", vec![0u8; 32]),
+            None,
+            4,
+            16,
+            [0u8; 32],
+        );
         assert_eq!(foreign.merkle_commitment(), Err(TvcError::OpeningRejected));
+    }
+
+    #[test]
+    fn attaching_a_proof_commitment_changes_the_anchor() {
+        let vector = vector_of(&[1.0, 2.0, 3.0]);
+        let open = commit_weights(&vector).unwrap();
+        let dual = commit_weights_with_proof(
+            &vector,
+            Some(SchemeCommitment::new("kzg-bn254/v1", vec![0xab; 32])),
+        )
+        .unwrap();
+
+        assert!(!open.has_proof_commitment());
+        assert!(dual.has_proof_commitment());
+        assert_ne!(open.root, dual.root, "C must cover the proof commitment");
+        assert_eq!(open.hash, dual.hash, "the hash identity is unchanged");
+        assert!(open.is_self_consistent() && dual.is_self_consistent());
+
+        // Openings are a property of the hash commitment, so they still work.
+        let opening = open_weight(&vector, 1).unwrap();
+        assert_eq!(
+            verify_weight_opening(&dual, 1, &vector.elements()[1], &opening),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn absence_of_a_proof_commitment_is_encoded_not_omitted() {
+        // `None` must not hash like a present-but-empty commitment, or a
+        // verifier could not tell "declined to commit" from "committed to
+        // nothing". A one-byte presence tag is what keeps the encoding injective.
+        let vector = vector_of(&[1.0, 2.0]);
+        let absent = commit_weights(&vector).unwrap();
+        let empty = commit_weights_with_proof(
+            &vector,
+            Some(SchemeCommitment::new("", Vec::new())),
+        )
+        .unwrap();
+        assert_ne!(absent.root, empty.root);
+    }
+
+    #[test]
+    fn the_proof_scheme_name_is_bound_not_just_its_bytes() {
+        // The same 32 bytes under two schemes must not yield the same anchor:
+        // a Poseidon root and a compressed BN254 G1 point are both 32 bytes.
+        let vector = vector_of(&[1.0, 2.0]);
+        let poseidon = commit_weights_with_proof(
+            &vector,
+            Some(SchemeCommitment::new("poseidon-bn254/v1", vec![0x7; 32])),
+        )
+        .unwrap();
+        let kzg = commit_weights_with_proof(
+            &vector,
+            Some(SchemeCommitment::new("kzg-bn254/v1", vec![0x7; 32])),
+        )
+        .unwrap();
+        assert_ne!(poseidon.root, kzg.root);
+    }
+
+    #[test]
+    fn with_proof_rebinds_rather_than_mutating() {
+        let vector = vector_of(&[1.0, 2.0]);
+        let open = commit_weights(&vector).unwrap();
+        let dual = open.clone().with_proof(SchemeCommitment::new("kzg-bn254/v1", vec![9; 32]));
+        assert_ne!(open.root, dual.root);
+        assert!(dual.is_self_consistent());
     }
 
     #[test]

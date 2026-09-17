@@ -103,6 +103,18 @@ pub enum TvcError {
         /// Digest actually produced by the records before it.
         observed: String,
     },
+    /// The registered proving-system commitment is not the expected one.
+    ///
+    /// Distinct from [`Self::CommitmentMismatch`], which is about the weights
+    /// themselves. This one fires when the weights were never in hand — the
+    /// closed-model case — and the circuit identity on record is not the one a
+    /// verifier was told to expect.
+    ProofCommitmentMismatch {
+        /// Proving-system commitment the caller pinned, or `none`.
+        expected: String,
+        /// Proving-system commitment the registry holds, or `none`.
+        observed: String,
+    },
     /// The ledger file grew since this handle read it, so its view is stale.
     ///
     /// Raised instead of appending, because an append computed against a stale
@@ -168,6 +180,10 @@ impl fmt::Display for TvcError {
             } => write!(
                 f,
                 "registry ledger hash chain broken at line {line}: record extends {expected}, but the preceding records produce {observed}"
+            ),
+            Self::ProofCommitmentMismatch { expected, observed } => write!(
+                f,
+                "proving-system commitment mismatch: expected {expected}, registry holds {observed}"
             ),
             Self::LedgerChangedUnderneath { expected, observed } => write!(
                 f,

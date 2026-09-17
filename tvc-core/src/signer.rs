@@ -370,21 +370,23 @@ impl RegistrationPayload {
     ///   explicitly rather than implicitly.
     pub fn sighash(&self, publisher: &[u8; 32]) -> [u8; 32] {
         let commitment = &self.weight_commitment;
-        tagged_hash(
-            DOMAIN_REGISTRATION_SIGHASH,
-            &[
-                publisher,
-                self.model_id.as_bytes(),
-                self.version.as_bytes(),
-                commitment.scheme.as_bytes(),
-                &commitment.root,
-                &commitment.scheme_commitment,
-                &commitment.length.to_be_bytes(),
-                &commitment.fractional_bits.to_be_bytes(),
-                &commitment.manifest_digest,
-                &self.timestamp.to_be_bytes(),
-            ],
-        )
+        let timestamp = self.timestamp.to_be_bytes();
+
+        let mut parts: Vec<&[u8]> = vec![
+            publisher,
+            self.model_id.as_bytes(),
+            self.version.as_bytes(),
+            &commitment.root,
+        ];
+        // Every input `root` binds, absorbed again. One signature therefore
+        // covers the hash identity and the proving-system identity together:
+        // a publisher cannot sign for open weights today and silently acquire a
+        // circuit commitment tomorrow, because that changes `root` and this hash.
+        let binding = commitment.binding_parts();
+        parts.extend(binding.iter().map(Vec::as_slice));
+        parts.push(&timestamp);
+
+        tagged_hash(DOMAIN_REGISTRATION_SIGHASH, &parts)
     }
 }
 

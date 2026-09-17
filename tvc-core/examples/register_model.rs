@@ -82,7 +82,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("   tensors            {}", weights.manifest().len());
     println!("   weights            {}", weights.len());
     println!("   fractional bits    {}", commitment.fractional_bits);
-    println!("   scheme             {}", commitment.scheme);
+    println!("   hash scheme        {}", commitment.hash.scheme);
     println!("   commitment C       {}", commitment.root_hex());
 
     // ---------------------------------------------------------------------

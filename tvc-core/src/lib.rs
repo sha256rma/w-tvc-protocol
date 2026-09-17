@@ -129,9 +129,10 @@ pub mod registry;
 pub mod signer;
 
 pub use commitment::{
-    commit_weights, open_weight, verify_weight_opening, Dtype, FieldElement, MerkleCommitment,
-    MerkleOpening, MerkleProver, MerkleVectorCommitment, NoParams, Quantizer, Tensor, TensorSpec,
-    VectorCommitment, WeightCommitment, WeightVector, MERKLE_SCHEME_TAG,
+    commit_weights, commit_weights_with_proof, open_weight, verify_weight_opening, Dtype,
+    FieldElement, MerkleCommitment, MerkleOpening, MerkleProver, MerkleVectorCommitment, NoParams,
+    Quantizer, SchemeCommitment, Tensor, TensorSpec, VectorCommitment, WeightCommitment,
+    WeightVector, MERKLE_SCHEME_TAG,
 };
 pub use error::{Result, TvcError};
 pub use registry::{ModelMetadata, ModelRecord, ModelRegistry, FORMAT_VERSION, GENESIS_DIGEST};

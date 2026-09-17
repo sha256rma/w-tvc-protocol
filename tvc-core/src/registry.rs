@@ -64,7 +64,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::commitment::{commit_weights, WeightCommitment, WeightVector};
+use crate::commitment::{commit_weights, SchemeCommitment, WeightCommitment, WeightVector};
 use crate::digest::{tagged_hash, DOMAIN_LEDGER_CHAIN};
 use crate::error::{Result, TvcError};
 use crate::hex;
@@ -88,7 +88,7 @@ pub const GENESIS_DIGEST: [u8; 32] = [0u8; 32];
 ///   digest differently, and a reader that cannot reproduce a digest cannot
 ///   honestly report the record as verified. Failing loudly beats verifying
 ///   something other than what was signed.
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
 
 /// The metadata half of a registration: who and when, without the commitment.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -181,25 +181,25 @@ impl ModelRecord {
     ) -> [u8; 32] {
         let payload = &registration.payload;
         let commitment = &payload.weight_commitment;
-        tagged_hash(
-            DOMAIN_LEDGER_CHAIN,
-            &[
-                previous,
-                &format_version.to_be_bytes(),
-                &sequence.to_be_bytes(),
-                payload.model_id.as_bytes(),
-                payload.version.as_bytes(),
-                commitment.scheme.as_bytes(),
-                &commitment.root,
-                &commitment.scheme_commitment,
-                &commitment.length.to_be_bytes(),
-                &commitment.fractional_bits.to_be_bytes(),
-                &commitment.manifest_digest,
-                &payload.timestamp.to_be_bytes(),
-                &registration.publisher,
-                &registration.signature,
-            ],
-        )
+        let version_bytes = format_version.to_be_bytes();
+        let sequence_bytes = sequence.to_be_bytes();
+        let timestamp_bytes = payload.timestamp.to_be_bytes();
+
+        let mut parts: Vec<&[u8]> = vec![
+            previous,
+            &version_bytes,
+            &sequence_bytes,
+            payload.model_id.as_bytes(),
+            payload.version.as_bytes(),
+            &commitment.root,
+        ];
+        let binding = commitment.binding_parts();
+        parts.extend(binding.iter().map(Vec::as_slice));
+        parts.push(&timestamp_bytes);
+        parts.push(&registration.publisher);
+        parts.push(&registration.signature);
+
+        tagged_hash(DOMAIN_LEDGER_CHAIN, &parts)
     }
 
     /// Renders this record as the JSON object the ledger stores.
@@ -225,10 +225,18 @@ struct WireRecord {
     sequence: u64,
     model_id: String,
     version: String,
-    scheme: String,
+    /// The published 32-byte anchor `C`.
     weight_commitment: String,
-    /// The underlying scheme's own commitment; length varies by scheme.
-    scheme_commitment: String,
+    /// Scheme of the hash-based commitment, always present.
+    hash_scheme: String,
+    /// The hash commitment itself; length varies by scheme.
+    hash_commitment: String,
+    /// Scheme of the proving-system commitment, when one has been chosen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    proof_scheme: Option<String>,
+    /// The proving-system commitment, when one has been chosen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    proof_commitment: Option<String>,
     length: u64,
     fractional_bits: u32,
     manifest_digest: String,
@@ -248,9 +256,11 @@ impl From<&ModelRecord> for WireRecord {
             sequence: record.sequence,
             model_id: payload.model_id.clone(),
             version: payload.version.clone(),
-            scheme: commitment.scheme.clone(),
             weight_commitment: hex::encode(&commitment.root),
-            scheme_commitment: hex::encode(&commitment.scheme_commitment),
+            hash_scheme: commitment.hash.scheme.clone(),
+            hash_commitment: commitment.hash.hex(),
+            proof_scheme: commitment.proof.as_ref().map(|p| p.scheme.clone()),
+            proof_commitment: commitment.proof.as_ref().map(SchemeCommitment::hex),
             length: commitment.length,
             fractional_bits: commitment.fractional_bits,
             manifest_digest: hex::encode(&commitment.manifest_digest),
@@ -279,15 +289,35 @@ impl WireRecord {
             )));
         }
 
+        // A proof commitment is present only when both of its fields are, so a
+        // record carrying one without the other is malformed rather than
+        // silently treated as absent — absence and presence bind differently.
+        let proof = match (self.proof_scheme, self.proof_commitment) {
+            (Some(scheme), Some(bytes)) => Some(SchemeCommitment::new(
+                scheme,
+                hex::decode(&bytes).map_err(|error| at(format!("proof_commitment: {error}")))?,
+            )),
+            (None, None) => None,
+            _ => {
+                return Err(at(
+                    "proof_scheme and proof_commitment must both be present or both absent"
+                        .to_owned(),
+                ))
+            }
+        };
+
         let registration = SignedRegistration {
             payload: RegistrationPayload::new(
                 self.model_id,
                 self.version,
                 WeightCommitment {
-                    scheme: self.scheme,
                     root: field("weight_commitment", &self.weight_commitment)?,
-                    scheme_commitment: hex::decode(&self.scheme_commitment)
-                        .map_err(|error| at(format!("scheme_commitment: {error}")))?,
+                    hash: SchemeCommitment::new(
+                        self.hash_scheme,
+                        hex::decode(&self.hash_commitment)
+                            .map_err(|error| at(format!("hash_commitment: {error}")))?,
+                    ),
+                    proof,
                     length: self.length,
                     fractional_bits: self.fractional_bits,
                     manifest_digest: field("manifest_digest", &self.manifest_digest)?,
@@ -641,14 +671,83 @@ impl ModelRegistry {
         weights: &WeightVector,
     ) -> Result<ModelRecord> {
         let record = self.get_version(model_id, version)?;
+        let registered = record.weight_commitment();
         let recomputed = commit_weights(weights)?;
-        if recomputed.root != record.weight_commitment().root {
+        // Compare at the *hash* layer, not at `root`. The weights determine the
+        // hash commitment and nothing else: `root` also binds the proving-system
+        // commitment, which cannot be derived from the weights at all. Comparing
+        // roots would make every dual-commitment record fail weight verification
+        // even when the weights are exactly right.
+        if recomputed.hash != registered.hash || !registered.is_self_consistent() {
             return Err(TvcError::CommitmentMismatch {
-                expected: record.weight_commitment().root_hex(),
-                observed: recomputed.root_hex(),
+                expected: registered.hash.hex(),
+                observed: recomputed.hash.hex(),
             });
         }
         Ok(record)
+    }
+
+    /// As [`Self::verify_weights`], but also pins the proving-system commitment.
+    ///
+    /// For a closed-weights model the hash check is unavailable — you do not have
+    /// the weights — and this is the call that matters once a proving layer
+    /// exists: it confirms the registry holds the proof commitment a circuit is
+    /// about to be verified against. Pass `None` to assert that no proving-system
+    /// commitment was registered.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TvcError::UnknownModel`], [`TvcError::CommitmentMismatch`] if
+    /// the weights do not match, or [`TvcError::ProofCommitmentMismatch`] if the
+    /// proving-system commitment is not the expected one.
+    pub fn verify_weights_with_proof(
+        &self,
+        model_id: &str,
+        version: &str,
+        weights: &WeightVector,
+        expected_proof: Option<SchemeCommitment>,
+    ) -> Result<ModelRecord> {
+        let record = self.verify_weights(model_id, version, weights)?;
+        self.check_proof_commitment(&record, expected_proof.as_ref())?;
+        Ok(record)
+    }
+
+    /// Confirms the registered proving-system commitment is the expected one.
+    ///
+    /// Usable without the weights, which is the point: this is the only half of
+    /// the registration a consumer of a closed model can check directly.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TvcError::UnknownModel`] or [`TvcError::ProofCommitmentMismatch`].
+    pub fn verify_proof_commitment(
+        &self,
+        model_id: &str,
+        version: &str,
+        expected: Option<&SchemeCommitment>,
+    ) -> Result<ModelRecord> {
+        let record = self.get_version(model_id, version)?;
+        self.check_proof_commitment(&record, expected)?;
+        Ok(record)
+    }
+
+    fn check_proof_commitment(
+        &self,
+        record: &ModelRecord,
+        expected: Option<&SchemeCommitment>,
+    ) -> Result<()> {
+        let describe = |value: Option<&SchemeCommitment>| match value {
+            Some(commitment) => format!("{}:{}", commitment.scheme, commitment.hex()),
+            None => "none".to_owned(),
+        };
+        let stored = record.weight_commitment().proof.as_ref();
+        if stored != expected {
+            return Err(TvcError::ProofCommitmentMismatch {
+                expected: describe(expected),
+                observed: describe(stored),
+            });
+        }
+        Ok(())
     }
 
     /// Re-derives every digest in the ledger and confirms the chain is intact.
@@ -1049,6 +1148,189 @@ mod tests {
             ModelRegistry::open(scratch.ledger()),
             Err(TvcError::LedgerCorrupt { line: 1, .. })
         ));
+    }
+
+    #[test]
+    fn a_dual_commitment_round_trips_and_stays_bound() {
+        use crate::commitment::commit_weights_with_proof;
+
+        let scratch = Scratch::new("dual");
+        let keypair = publisher();
+        let vector = weights(&[1.0, 2.0, 3.0, 4.0]);
+        let commitment = commit_weights_with_proof(
+            &vector,
+            Some(SchemeCommitment::new("kzg-bn254/v1", vec![0xab; 32])),
+        )
+        .unwrap();
+
+        let written = {
+            let mut registry = ModelRegistry::open(scratch.ledger()).unwrap();
+            let payload = RegistrationPayload::new(
+                "acme/closed-model",
+                "1.0.0",
+                commitment.clone(),
+                1_760_000_000,
+            );
+            registry
+                .register_signed(keypair.sign(&payload, &[1u8; 32]).unwrap())
+                .unwrap()
+        };
+
+        let reopened = ModelRegistry::open(scratch.ledger()).unwrap();
+        let read = reopened.get_model_commitment("acme/closed-model").unwrap();
+        assert_eq!(read, written);
+
+        let stored = read.weight_commitment();
+        assert!(stored.has_proof_commitment());
+        assert_eq!(stored.proof.as_ref().unwrap().scheme, "kzg-bn254/v1");
+        assert_eq!(stored.proof.as_ref().unwrap().bytes, vec![0xab; 32]);
+        assert!(stored.is_self_consistent());
+
+        // The hash half still works for anyone holding the weights.
+        assert!(reopened
+            .verify_weights_with_proof("acme/closed-model", "1.0.0", &vector, stored.proof.clone())
+            .is_ok());
+    }
+
+    #[test]
+    fn weights_verify_against_a_dual_commitment_record() {
+        // Regression: `root` binds the proving-system commitment too, so weight
+        // verification has to compare the hash layer. Comparing roots rejected
+        // correct weights for every closed-model record.
+        use crate::commitment::commit_weights_with_proof;
+
+        let scratch = Scratch::new("dual-weights");
+        let mut registry = ModelRegistry::open(scratch.ledger()).unwrap();
+        let keypair = publisher();
+        let vector = weights(&[1.0, 2.0, 3.0]);
+        let commitment = commit_weights_with_proof(
+            &vector,
+            Some(SchemeCommitment::new("kzg-bn254/v1", vec![0x5; 32])),
+        )
+        .unwrap();
+        let payload =
+            RegistrationPayload::new("acme/model", "1.0.0", commitment, 1_760_000_000);
+        registry
+            .register_signed(keypair.sign(&payload, &[1u8; 32]).unwrap())
+            .unwrap();
+
+        assert!(registry.verify_weights("acme/model", "1.0.0", &vector).is_ok());
+        assert!(matches!(
+            registry.verify_weights("acme/model", "1.0.0", &weights(&[1.0, 2.0, 3.5])),
+            Err(TvcError::CommitmentMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn the_proof_commitment_is_checkable_without_the_weights() {
+        // The only half of a closed-model registration a consumer can check
+        // directly, and the hook the circuit layer will use.
+        use crate::commitment::commit_weights_with_proof;
+
+        let scratch = Scratch::new("proof-only");
+        let mut registry = ModelRegistry::open(scratch.ledger()).unwrap();
+        let keypair = publisher();
+        let expected = SchemeCommitment::new("kzg-bn254/v1", vec![0x9; 32]);
+        let commitment =
+            commit_weights_with_proof(&weights(&[1.0, 2.0]), Some(expected.clone())).unwrap();
+        let payload =
+            RegistrationPayload::new("acme/model", "1.0.0", commitment, 1_760_000_000);
+        registry
+            .register_signed(keypair.sign(&payload, &[1u8; 32]).unwrap())
+            .unwrap();
+
+        assert!(registry
+            .verify_proof_commitment("acme/model", "1.0.0", Some(&expected))
+            .is_ok());
+        assert!(matches!(
+            registry.verify_proof_commitment(
+                "acme/model",
+                "1.0.0",
+                Some(&SchemeCommitment::new("kzg-bn254/v1", vec![0xff; 32]))
+            ),
+            Err(TvcError::ProofCommitmentMismatch { .. })
+        ));
+        // A different scheme over the same bytes is also a mismatch.
+        assert!(matches!(
+            registry.verify_proof_commitment(
+                "acme/model",
+                "1.0.0",
+                Some(&SchemeCommitment::new("poseidon-bn254/v1", vec![0x9; 32]))
+            ),
+            Err(TvcError::ProofCommitmentMismatch { .. })
+        ));
+        assert!(matches!(
+            registry.verify_proof_commitment("acme/model", "1.0.0", None),
+            Err(TvcError::ProofCommitmentMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn a_proof_commitment_cannot_be_added_after_signing() {
+        // The whole point of binding both under one signature: a publisher who
+        // signed for open weights cannot silently acquire a circuit identity.
+        let keypair = publisher();
+        let commitment = commitment_of(&[1.0, 2.0]);
+        let payload =
+            RegistrationPayload::new("acme/model", "1.0.0", commitment, 1_760_000_000);
+        let mut signed = keypair.sign(&payload, &[1u8; 32]).unwrap();
+        assert_eq!(signed.verify(), Ok(()));
+
+        signed.payload.weight_commitment = signed
+            .payload
+            .weight_commitment
+            .clone()
+            .with_proof(SchemeCommitment::new("kzg-bn254/v1", vec![0xcd; 32]));
+
+        assert_eq!(signed.verify(), Err(TvcError::AttestationUnsigned));
+    }
+
+    #[test]
+    fn a_half_present_proof_commitment_is_malformed() {
+        use crate::commitment::commit_weights_with_proof;
+
+        let scratch = Scratch::new("half-proof");
+        let keypair = publisher();
+        let commitment = commit_weights_with_proof(
+            &weights(&[1.0]),
+            Some(SchemeCommitment::new("kzg-bn254/v1", vec![0xab; 32])),
+        )
+        .unwrap();
+        {
+            let mut registry = ModelRegistry::open(scratch.ledger()).unwrap();
+            let payload =
+                RegistrationPayload::new("acme/model", "1.0.0", commitment, 1_760_000_000);
+            registry
+                .register_signed(keypair.sign(&payload, &[1u8; 32]).unwrap())
+                .unwrap();
+        }
+
+        let text = std::fs::read_to_string(scratch.ledger()).unwrap();
+        let mut wire: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
+        wire.as_object_mut().unwrap().remove("proof_scheme");
+        std::fs::write(scratch.ledger(), format!("{wire}\n")).unwrap();
+
+        assert!(matches!(
+            ModelRegistry::open(scratch.ledger()),
+            Err(TvcError::LedgerCorrupt { line: 1, .. })
+        ));
+    }
+
+    #[test]
+    fn an_open_weights_record_carries_no_proof_fields() {
+        let scratch = Scratch::new("no-proof-fields");
+        let mut registry = ModelRegistry::open(scratch.ledger()).unwrap();
+        let keypair = publisher();
+        registry
+            .register_signed(sign(&keypair, "acme/model", "1.0.0", commitment_of(&[1.0])))
+            .unwrap();
+
+        let text = std::fs::read_to_string(scratch.ledger()).unwrap();
+        let wire: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
+        let object = wire.as_object().unwrap();
+        assert!(!object.contains_key("proof_scheme"));
+        assert!(!object.contains_key("proof_commitment"));
+        assert!(object.contains_key("hash_scheme"));
     }
 
     #[test]

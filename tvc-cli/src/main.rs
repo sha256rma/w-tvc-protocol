@@ -22,8 +22,8 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use tvc_core::commitment::{
-    commit_weights, open_weight, verify_weight_opening, Quantizer, Tensor, WeightCommitment,
-    WeightVector,
+    commit_weights, commit_weights_with_proof, open_weight, verify_weight_opening, Quantizer,
+    SchemeCommitment, Tensor, WeightCommitment, WeightVector,
 };
 use tvc_core::error::TvcError;
 use tvc_core::registry::{ModelRegistry, GENESIS_DIGEST};
@@ -76,6 +76,15 @@ enum Command {
         /// Fixed-point fractional bits used when quantising.
         #[arg(long, default_value_t = Quantizer::DEFAULT_FRACTIONAL_BITS)]
         fractional_bits: u32,
+        /// Proving-system commitment scheme, for example `kzg-bn254/v1`.
+        ///
+        /// Required together with --proof-commitment. Supply both when the model
+        /// is served closed and a circuit will later prove against it.
+        #[arg(long, requires = "proof_commitment")]
+        proof_scheme: Option<String>,
+        /// Proving-system commitment, as lowercase hex.
+        #[arg(long, requires = "proof_scheme")]
+        proof_commitment: Option<String>,
     },
 
     /// Print the latest registration for a model.
@@ -102,6 +111,12 @@ enum Command {
         /// Recompute C from this `.safetensors` file and compare it.
         #[arg(long)]
         weights: Option<PathBuf>,
+        /// Check the registered proving-system commitment instead of the weights.
+        ///
+        /// This is the closed-model path: it needs no weights, and reports the
+        /// circuit identity a proof would have to be verified against.
+        #[arg(long)]
+        zk: bool,
     },
 
     /// Re-derive every digest in the ledger and report its head.
@@ -134,14 +149,31 @@ fn main() -> ExitCode {
             version,
             registry,
             fractional_bits,
-        } => register(&weights, &model_id, &version, &registry, fractional_bits),
+            proof_scheme,
+            proof_commitment,
+        } => register(
+            &weights,
+            &model_id,
+            &version,
+            &registry,
+            fractional_bits,
+            proof_scheme.as_deref(),
+            proof_commitment.as_deref(),
+        ),
         Command::Get { model_id, registry } => get(&model_id, &registry),
         Command::Verify {
             model_id,
             registry,
             publisher,
             weights,
-        } => verify(&model_id, &registry, publisher.as_deref(), weights.as_deref()),
+            zk,
+        } => verify(
+            &model_id,
+            &registry,
+            publisher.as_deref(),
+            weights.as_deref(),
+            zk,
+        ),
         Command::Audit { registry } => audit(&registry),
         Command::Demo { out } => demo(&out),
     };
@@ -180,15 +212,19 @@ fn load_weights(path: &Path, fractional_bits: u32) -> Result<WeightVector, Strin
 }
 
 fn print_commitment(commitment: &WeightCommitment, weights: &WeightVector) {
-    println!("  scheme             {}", commitment.scheme);
+    println!("  hash scheme        {}", commitment.hash.scheme);
     println!("  tensors            {}", weights.manifest().len());
     println!("  elements           {}", commitment.length);
     println!("  fractional bits    {}", commitment.fractional_bits);
     println!("  manifest digest    {}", hex::encode(&commitment.manifest_digest));
-    println!(
-        "  scheme commitment  {}",
-        hex::encode(&commitment.scheme_commitment)
-    );
+    println!("  hash commitment    {}", commitment.hash.hex());
+    match &commitment.proof {
+        Some(proof) => {
+            println!("  proof scheme       {}", proof.scheme);
+            println!("  proof commitment   {}", proof.hex());
+        }
+        None => println!("  proof commitment   (none registered)"),
+    }
     println!("  commitment C       {}", commitment.root_hex());
 }
 
@@ -218,16 +254,40 @@ fn commit(weights_path: &Path, fractional_bits: u32) -> Result<(), String> {
     Ok(())
 }
 
+/// Parses the optional proving-system commitment pair.
+fn parse_proof_commitment(
+    scheme: Option<&str>,
+    bytes: Option<&str>,
+) -> Result<Option<SchemeCommitment>, String> {
+    match (scheme, bytes) {
+        (Some(scheme), Some(bytes)) => {
+            let decoded = hex::decode(bytes.trim()).map_err(|error| {
+                format!("--proof-commitment must be lowercase hex: {}", describe(error))
+            })?;
+            if decoded.is_empty() {
+                return Err("--proof-commitment must not be empty".to_owned());
+            }
+            Ok(Some(SchemeCommitment::new(scheme, decoded)))
+        }
+        (None, None) => Ok(None),
+        // clap's `requires` already enforces this; belt and braces.
+        _ => Err("--proof-scheme and --proof-commitment must be given together".to_owned()),
+    }
+}
+
 fn register(
     weights_path: &Path,
     model_id: &str,
     version: &str,
     ledger: &Path,
     fractional_bits: u32,
+    proof_scheme: Option<&str>,
+    proof_commitment: Option<&str>,
 ) -> Result<(), String> {
     let keypair = publisher_key()?;
+    let proof = parse_proof_commitment(proof_scheme, proof_commitment)?;
     let weights = load_weights(weights_path, fractional_bits)?;
-    let commitment = commit_weights(&weights).map_err(describe)?;
+    let commitment = commit_weights_with_proof(&weights, proof).map_err(describe)?;
 
     let payload =
         RegistrationPayload::new(model_id, version, commitment.clone(), unix_now());
@@ -262,6 +322,7 @@ fn verify(
     ledger: &Path,
     publisher: Option<&str>,
     weights_path: Option<&Path>,
+    zk: bool,
 ) -> Result<(), String> {
     let registry = ModelRegistry::open(ledger).map_err(describe)?;
 
@@ -298,6 +359,34 @@ fn verify(
             .map_err(describe)?;
         println!();
         println!("Weights at {} match the registered commitment.", path.display());
+    }
+
+    if zk {
+        println!();
+        match &record.weight_commitment().proof {
+            Some(proof) => {
+                println!("Proving-system commitment registered:");
+                println!("  scheme             {}", proof.scheme);
+                println!("  commitment         {}", proof.hex());
+                println!("  quantised at       2^-{} fractional bits", record.weight_commitment().fractional_bits);
+                println!();
+                println!("A circuit proving an inference for this model must prove against");
+                println!("this commitment, over weights quantised at that same scale.");
+            }
+            None => {
+                return Err(format!(
+                    "{} registered no proving-system commitment; there is nothing for a circuit to bind to",
+                    record.address()
+                ))
+            }
+        }
+    }
+
+    if weights_path.is_none() && !zk {
+        println!();
+        println!("note: the signature is all that was checked. It says a key made this");
+        println!("      claim, not that any particular weights are behind it. Pass");
+        println!("      --weights to re-derive C, or --zk for the closed-model path.");
     }
 
     Ok(())

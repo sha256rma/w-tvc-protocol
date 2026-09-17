@@ -8,7 +8,8 @@
 use std::path::{Path, PathBuf};
 
 use tvc_core::commitment::{
-    commit_weights, open_weight, verify_weight_opening, Quantizer, Tensor, WeightVector,
+    commit_weights, commit_weights_with_proof, open_weight, verify_weight_opening, Quantizer,
+    SchemeCommitment, Tensor, WeightVector,
 };
 use tvc_core::registry::{ModelMetadata, ModelRegistry};
 use tvc_core::signer::{PublisherKeypair, RegistrationPayload};
@@ -274,6 +275,61 @@ fn a_rival_cannot_republish_a_model_under_its_own_key() {
 }
 
 #[test]
+fn a_closed_weights_model_is_verifiable_without_the_weights() {
+    // The case the whole dual commitment exists for. A consumer of a closed
+    // model never sees W, so the hash half is unavailable to them. What they can
+    // check is that the publisher they trust is on record for a specific circuit
+    // identity — and that is what a future proof must be verified against.
+    let scratch = Scratch::new("closed-weights");
+    let ledger = scratch.join("registry.jsonl");
+
+    let weights = WeightVector::from_tensors(
+        model_tensors(&synthetic_weights(24, 0x5eed)),
+        Quantizer::default(),
+    )
+    .unwrap();
+    // Stands in for the proving system's witness-column commitment. tvc-core
+    // does not compute it; it guarantees it is signed for.
+    let circuit_commitment = SchemeCommitment::new("kzg-bn254/v1", vec![0x42; 32]);
+    let commitment =
+        commit_weights_with_proof(&weights, Some(circuit_commitment.clone())).unwrap();
+
+    let publisher = publisher();
+    {
+        let mut registry = ModelRegistry::open(&ledger).unwrap();
+        let payload =
+            RegistrationPayload::new(MODEL_ID, VERSION, commitment.clone(), TIMESTAMP);
+        registry
+            .register_signed(publisher.sign(&payload, &[0x22; 32]).unwrap())
+            .unwrap();
+    }
+
+    // Everything below is what a consumer can do holding only the ledger and a
+    // pinned key. No weights anywhere in this block.
+    let registry = ModelRegistry::open(&ledger).unwrap();
+    registry
+        .verify_model_registration_by(MODEL_ID, &publisher.public_key())
+        .unwrap();
+    registry
+        .verify_proof_commitment(MODEL_ID, VERSION, Some(&circuit_commitment))
+        .unwrap();
+
+    // A different circuit identity under the same signature is not possible:
+    // the commitment is bound into C, which is bound into the signature.
+    assert!(matches!(
+        registry.verify_proof_commitment(
+            MODEL_ID,
+            VERSION,
+            Some(&SchemeCommitment::new("kzg-bn254/v1", vec![0x43; 32]))
+        ),
+        Err(TvcError::ProofCommitmentMismatch { .. })
+    ));
+
+    // And the publisher, who does hold W, can still prove the hash half.
+    assert!(registry.verify_weights(MODEL_ID, VERSION, &weights).is_ok());
+}
+
+#[test]
 fn a_tampered_ledger_is_detected_on_reopen() {
     let scratch = Scratch::new("tamper");
     let ledger = scratch.join("registry.jsonl");
@@ -351,7 +407,7 @@ fn the_ledger_is_greppable_json_lines() {
     for line in text.lines() {
         let value: serde_json::Value = serde_json::from_str(line).unwrap();
         assert_eq!(value["model_id"], MODEL_ID);
-        assert_eq!(value["scheme"], "merkle-sha256/v1");
+        assert_eq!(value["hash_scheme"], "merkle-sha256/v1");
         assert!(value["weight_commitment"].as_str().unwrap().len() == 64);
     }
 }

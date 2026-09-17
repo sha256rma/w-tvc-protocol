@@ -16,9 +16,15 @@ This repository currently implements the **model setup and public registry layer
 
 "This is Llama-3.2-1B" is, today, a filename and a README.
 
-Nothing connects a set of weights to a claim by a named party. A mirror can serve a 1B distillation under a 70B name. A fine-tune can be redistributed as the base model. A provider can quietly swap a cheaper checkpoint behind an API and bill for the flagship. A consumer downloading weights has no way to tell any of this, because there is no artefact to check against.
+Nothing connects a set of weights to a claim by a named party. A mirror can serve a 1B distillation under a 70B name. A fine-tune can be redistributed as the base model. A provider can quietly swap a cheaper checkpoint behind an API and bill for the flagship.
 
-The usual answer is to trust a hosting platform's account system. That works exactly as far as the platform's perimeter and not one step past it — it says nothing about the copy on your disk, the copy on a mirror, or the copy behind someone's inference endpoint.
+Those are two different problems and it matters which one you are solving.
+
+**Open weights.** You can download `W`. What is missing is an artefact to check it against — a signed statement from a named party saying "this is what we shipped".
+
+**Closed weights.** You will never have `W`. The lab has it and you do not trust the lab. No amount of hashing on your side helps, because you have nothing to hash. What you need is (a) the lab irrevocably on record for one specific model, and (b) a way to check that a served inference came from *that* model. (b) requires zero-knowledge proofs of inference, and **is not implemented here** — see [Roadmap](#roadmap). (a) is.
+
+The usual answer to both is to trust a hosting platform's account system. That works exactly as far as the platform's perimeter and not one step past it.
 
 ## The approach
 
@@ -27,18 +33,44 @@ Make the weights themselves the thing that is named, and let a **key** rather th
 | Stage | What happens |
 |---|---|
 | **Commit** | Weight tensors are quantised to a field vector and reduced to a 32-byte commitment `C`. |
-| **Attest** | The publishing lab signs `(model_id, version, C, timestamp)` with a BIP-340 Schnorr signature. |
+| **Attest** | The publishing lab signs `(publisher, model_id, version, C, timestamp)` with a BIP-340 Schnorr signature. |
 | **Register** | The signed attestation is appended to a hash-chained, append-only ledger. |
-| **Verify** | Anyone recomputes `C` from weights in hand and checks the signature against a pinned publisher key. |
+| **Verify** | Depends on which problem you have — see below. |
 
-Verification needs the ledger, the weights, and the publisher's 32-byte public key. It does not need the publisher to be online, a certificate chain, or a trusted third party.
+### What "verify" means in each case
+
+| | Open weights | Closed weights |
+|---|---|---|
+| Check the signature against a pinned key | ✅ | ✅ |
+| Recompute `C` from `W` and compare | ✅ | ✖ you have no `W` |
+| Open individual weights against `C` | ✅ | only the lab can produce these |
+| Bind a **served inference** to `C` | n/a | ⏳ needs the proving layer |
+
+For open weights that is a complete story. For closed weights what you get today is **non-repudiation and consistency, not correctness**: the lab is on record for a specific `C`, and once the proving layer exists every inference must prove against that same `C`, so they cannot show one model to benchmarkers and serve another to customers. Nothing here establishes that the committed weights are any good, and nothing can.
+
+### The dual commitment
+
+Because of that gap, a registration binds **two** commitments under one signature:
+
+```
+C = tagged_hash( hash_commitment ‖ proof_commitment? ‖ length ‖ scale ‖ manifest )
+```
+
+- **`hash_commitment`** — a SHA-256 Merkle root. Always present. Anyone holding the weights recomputes it on a laptop, no trusted setup.
+- **`proof_commitment`** — optional, the proving system's own commitment (a KZG `G1` point, a Poseidon root). Present once a proving system is chosen.
+
+The second exists because a hash tree is the wrong object to check *inside* a circuit. Verifying a SHA-256 Merkle root over `n` weights costs roughly `2n` compressions at ~25–30k constraints each: for a billion-parameter model that is ~5×10¹³ constraints, several orders of magnitude past feasible. Poseidon cuts it ~100× and is still infeasible. The workable answer is for the weight commitment to *be* the commitment the proving system already produces for its witness columns, where binding costs almost nothing.
+
+Both are folded into `C` and therefore covered by one signature — so the fast public identity and the in-circuit identity cannot drift apart. A publisher who signed for open weights cannot silently acquire a circuit identity later; that changes `C` and the signature stops verifying.
+
+**A trap this creates.** `C` commits to weights quantised at a declared scale. A proof built against `proof_commitment` is a proof about the *quantised* vector — so if the deployed model serves `bf16` while the commitment is at `2^-16`, the proof is about different arithmetic than the thing answering requests. For closed weights the scale has to match the inference arithmetic, not the storage format.
 
 ---
 
 ## Quick start
 
 ```bash
-cargo test          # 87 tests
+cargo test          # 98 tests
 cargo run --bin tvc -- demo
 ```
 
@@ -66,6 +98,17 @@ cargo run --bin tvc -- register \
   --model-id meta-llama/Llama-3.2-1B \
   --version 1.0.0 \
   --registry registry.jsonl
+
+# 3b. For a closed model, bind the proving system's commitment under the same
+#     signature. It must be supplied now — attaching one later changes C and
+#     invalidates the signature, which is the intended behaviour.
+cargo run --bin tvc -- register \
+  --weights model.safetensors \
+  --model-id acme/closed-model \
+  --version 1.0.0 \
+  --registry registry.jsonl \
+  --proof-scheme kzg-bn254/v1 \
+  --proof-commitment <hex>
 ```
 
 ### Verifying as a consumer
@@ -74,12 +117,20 @@ cargo run --bin tvc -- register \
 # Signature only: proves somebody signed this claim.
 cargo run --bin tvc -- verify --model-id meta-llama/Llama-3.2-1B --registry registry.jsonl
 
-# Pin the publisher and re-derive C from the weights on disk. This is the real check.
+# Open weights: pin the publisher and re-derive C from the weights on disk.
 cargo run --bin tvc -- verify \
   --model-id meta-llama/Llama-3.2-1B \
   --registry registry.jsonl \
   --publisher <publisher public key> \
   --weights model.safetensors
+
+# Closed weights: no weights to check, so report the circuit identity a proof
+# would have to be verified against.
+cargo run --bin tvc -- verify \
+  --model-id meta-llama/Llama-3.2-1B \
+  --registry registry.jsonl \
+  --publisher <publisher public key> \
+  --zk
 
 # Re-derive every digest in the ledger and print its head.
 cargo run --bin tvc -- audit --registry registry.jsonl
@@ -205,6 +256,7 @@ Honesty about scope is load-bearing for a protocol that asks to be trusted.
 
 - **Name ownership.** Two publishers can register the same `model_id` under different keys, exactly as two people can claim a username on two different servers. A registry cannot adjudicate this. Consumers resolve it by *pinning a key* — `verify_model_registration_by` — not by trusting the registry's ordering. There is an integration test asserting that a bare signature check passes for a rival's registration, because that is precisely why a bare check is not enough.
 - **Weight quality.** `C` says which weights, not whether they are any good.
+- **That a served inference used the committed weights.** This is the closed-weights gap and it is not closed here. `proof_commitment` is the hook for it; the circuit that would use it does not exist in this tree.
 - **Timestamps.** The registry has no way to check a publisher's clock and does not pretend to. The timestamp is part of what was signed, so it is exactly as trustworthy as the key that signed it.
 - **Rollback.** Truncating the ledger yields a shorter but internally valid history. This is caught by holding an earlier head, not by the chain itself — there is a test pinning that limitation in place.
 - **Anything in a ledger line this build does not recognise.** Unknown JSON fields are ignored so that a record written by a later version still opens here, and they are covered by neither the digest nor the signature. They are inert by construction and nothing should read them. An unknown *format version*, by contrast, is a hard stop: a reader that cannot reproduce a digest cannot honestly call the record verified.
@@ -271,8 +323,8 @@ Hex stays in-tree (`tvc_core::hex`): forty auditable lines, and every digest a v
 2. **Openings at scale.** Swap `MerkleVectorCommitment` for KZG behind the existing `VectorCommitment` trait, for constant-size and circuit-friendly openings.
 3. **Scale.** Streaming leaf construction and a memory-mapped tree, to lift the in-memory ceiling past tens of millions of parameters.
 4. **ONNX ingestion.** A second loader producing `Tensor`, so the commitment scheme is unchanged.
-5. **Circuit registration.** Register the arithmetic circuit for a model alongside its weights, committing to the relation as well as the parameters. This is also when the tree hash should move to Poseidon.
-6. **Runtime proofs.** Prove an inference was served by the committed weights. This is where the commitment made in step 1 gets used — and why the weight vector already lives in BN254's scalar field.
+5. **Circuit registration.** Register the arithmetic circuit for a model alongside its weights, committing to the relation as well as the parameters. Choosing the proving system here is what fills `proof_commitment` with something real rather than a caller-supplied blob.
+6. **Runtime proofs.** Prove an inference was served by the committed weights — the step that closes the closed-weights gap. Requires 5, and requires the quantisation scale to match the inference arithmetic.
 7. **Distribution.** Replicate the ledger and publish the head digest somewhere a consumer can independently see it — a CT-style signed tree head, anchored periodically to a public chain.
 
 ---
