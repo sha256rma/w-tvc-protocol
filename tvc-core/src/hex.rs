@@ -1,16 +1,17 @@
 //! Minimal lowercase hexadecimal codec.
 //!
 //! `tvc-core` carries its own hex implementation rather than pulling a
-//! dependency. The protocol moves 32-byte digests and 64-byte signatures across
-//! a Nostr relay boundary, so hex is on the trust path: every byte a wallet acts
-//! on passes through [`decode`]. Keeping roughly forty auditable lines in-tree is
-//! preferred over widening the supply chain for a trivial transformation.
+//! dependency. The protocol moves 32-byte commitments and 64-byte signatures
+//! across the registry boundary, so hex is on the trust path: every byte a
+//! verifier acts on passes through [`decode`]. Keeping roughly forty auditable
+//! lines in-tree is preferred over widening the supply chain for a trivial
+//! transformation.
 //!
 //! [`decode`] is strict by construction. It rejects uppercase input, odd-length
 //! input, and any non-hex byte, so a digest string has exactly one valid
-//! encoding. Accepting mixed case would let the same digest travel under two
-//! spellings, and relay-level deduplication of commitments is easier to reason
-//! about when the encoding is canonical.
+//! encoding. Accepting mixed case would let the same commitment travel under two
+//! spellings, and an append-only registry that must reject duplicate
+//! registrations is far easier to reason about when the encoding is canonical.
 
 use crate::error::{Result, TvcError};
 

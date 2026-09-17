@@ -1,6 +1,6 @@
 # W-TVC Protocol
 
-**Weight Threshold Verification Ceremony** — prove which AI model served an inference, without trusting the provider, a hardware enclave, or any party on the runtime path.
+**Verifiable Model Identity** — bind a set of AI model weights to the identity of the lab that published them, so anyone holding a copy can check whether it is the model its publisher attested to.
 
 Built for **Bitshala BOSS Battle** · Tracks: **Machine Money** × **Freedom Stack**
 
@@ -8,370 +8,275 @@ Built for **Bitshala BOSS Battle** · Tracks: **Machine Money** × **Freedom Sta
 Ship code. Beat the boss.
 ```
 
+This repository currently implements the **model setup and public registry layer**. The zkML circuit and proving layer is future work; see [Roadmap](#roadmap).
+
 ---
 
 ## The problem
 
-An autonomous agent asks a remote model to authorise a payment. The model answers. The payment goes through.
+"This is Llama-3.2-1B" is, today, a filename and a README.
 
-Which model actually answered?
+Nothing connects a set of weights to a claim by a named party. A mirror can serve a 1B distillation under a 70B name. A fine-tune can be redistributed as the base model. A provider can quietly swap a cheaper checkpoint behind an API and bill for the flagship. A consumer downloading weights has no way to tell any of this, because there is no artefact to check against.
 
-Nobody knows. The provider advertises a flagship model, routes the request to a cheaper distillation, and bills for the flagship. This is **token downgrading**, and it is invisible by construction: the output is plausible, the latency is better, and the only entity who could tell you is the entity with the incentive not to. As soon as software transacts on its own behalf, this stops being a billing dispute and becomes a payment-authorisation vulnerability — the agent's judgement is only as good as the model behind it, and the agent cannot check which model that was.
-
-The usual answer is a **hardware TEE**: run the model in an enclave and have the silicon attest to the binary. That trades a trusted provider for a trusted silicon vendor. It has not gone well — SGX, SEV, and friends have a long CVE history — and it does not work at all for a model you rent rather than own. It also puts an attestation service on the runtime path of every single inference.
+The usual answer is to trust a hosting platform's account system. That works exactly as far as the platform's perimeter and not one step past it — it says nothing about the copy on your disk, the copy on a mirror, or the copy behind someone's inference endpoint.
 
 ## The approach
 
-Move the trust from silicon to arithmetic, and pay the expensive cost exactly once.
+Make the weights themselves the thing that is named, and let a **key** rather than a platform do the naming.
 
-A Groth16 trusted setup depends only on the **shape** of the constraint system, never on any witness. The shape is fixed by the model architecture. So one ceremony per model version produces one verifying key that covers every inference that version will ever serve. Freeze it into 32 bytes, sign it, publish it to Nostr, and every downstream wallet can verify locally forever — no authority to ask, no service to call, no enclave to trust.
+| Stage | What happens |
+|---|---|
+| **Commit** | Weight tensors are quantised to a field vector and reduced to a 32-byte commitment `C`. |
+| **Attest** | The publishing lab signs `(model_id, version, C, timestamp)` with a BIP-340 Schnorr signature. |
+| **Register** | The signed attestation is appended to a hash-chained, append-only ledger. |
+| **Verify** | Anyone recomputes `C` from weights in hand and checks the signature against a pinned publisher key. |
 
-| | Phase 1 — Genesis | Phase 2 — Runtime |
-|---|---|---|
-| **Frequency** | Once per model version | Every inference |
-| **Cost** | 78 ms (this circuit) | 128-byte proof, local check |
-| **Trust** | Ceremony participants + public transcript | None |
-| **Output** | 32-byte digest on Nostr relays | ACCEPT / REJECT |
-
----
-
-## Phase 1 — Genesis Setup Ceremony
-
-```
-  bitshala            ┌──────────────────────────────────────┐
-  entropy ───────────►│                                      │
-                      │   hash-chained transcript            │
-  acme-labs           │   (append-only, publicly auditable)  │──► ceremony seed
-  entropy ───────────►│   tagged SHA-256, length-prefixed    │         │
-                      │                                      │         │
-  independent         │                                      │         │
-  auditor  ──────────►└──────────────────────────────────────┘         │
-  entropy                                                              │
-                                                                       ▼
-                                                         ┌──────────────────────────┐
-                                                         │  Groth16 circuit setup   │
-                                                         │  (BN254, arkworks)       │
-                                                         └────────────┬─────────────┘
-                                                                      │
-                                          ┌───────────────────────────┴──────────┐
-                                          ▼                                      ▼
-                                  proving key (1840 B)                 verifying key (360 B)
-                                  → to the AI provider                           │
-                                                                    tagged SHA-256 domain hash
-                                                                                 │
-      ┌───────────────────────┐                                                  ▼
-      │  TOXIC WASTE          │                                    ╔═════════════════════════╗
-      │  ceremony seed +      │─── volatile overwrite ──► GONE     ║  32-byte vk digest      ║
-      │  every contribution   │    (zeroize, full capacity)        ║  the permanent anchor   ║
-      └───────────────────────┘             │                      ╚════════════╤════════════╝
-                                            ▼                                   │
-                                   burn attestation ────────────────────────────┤
-                                   (publishable evidence)                       │
-                                                                 BIP-340 Schnorr sign (secp256k1)
-                                                                                │
-                                                                                ▼
-                                                            ┌───────────────────────────────┐
-                                                            │  Nostr event, kind 30200      │
-                                                            │  d = <model_id>:<version>     │
-                                                            └───────────────┬───────────────┘
-                                                                            │
-                                      ┌──────────────┬──────────────┬───────┴────────┐
-                                      ▼              ▼              ▼                ▼
-                                relay.damus.io    nos.lol    relay.primal.net   nostr.mom
-```
-
-The entropy that could forge proofs is destroyed before the ceremony process exits. What survives is 32 bytes, a signature, and a transcript anyone can re-check.
-
-## Phase 2 — Runtime Verification
-
-```
-   user ──► SPOT Wallet ──► "authorise ₹4,200 UPI payment"
-                 │
-                 │  ① resolve the commitment  (kind 30200, #d = model:version, author pinned)
-                 ▼
-        ┌─────────────────┐
-        │  Nostr relays   │──────► 32-byte vk digest  +  BIP-340 signature
-        └─────────────────┘        (any relay will do — the signature is the trust, not the host)
-                 │
-                 │  ② request the inference
-                 ▼
-        ┌─────────────────┐
-        │  AI provider    │──────► output  +  Groth16 proof (128 B)  +  verifying key (360 B)
-        └─────────────────┘
-                 │
-                 │  ③ verify locally — no network, no authority, no enclave
-                 ▼
-   ╔═══════════════════════════════════════════════════════════════════════╗
-   ║                                                                       ║
-   ║   a.  digest = tagged_hash(runtime verifying key)                     ║
-   ║                                                                       ║
-   ║       digest == digest from relay ?                                   ║
-   ║              │                                                        ║
-   ║              ├── NO ──► ✗ REJECT — model substitution                 ║
-   ║              │          the proof may be perfectly valid, but it      ║
-   ║              │          was made against a DIFFERENT circuit          ║
-   ║              ▼ YES                                                    ║
-   ║                                                                       ║
-   ║   b.  Groth16 pairing check (proof, key, public inputs)               ║
-   ║              │                                                        ║
-   ║              ├── NO ──► ✗ REJECT — invalid execution                  ║
-   ║              ▼ YES                                                    ║
-   ║                                                                       ║
-   ║          ✓ ACCEPT — the committed model produced this output          ║
-   ║                                                                       ║
-   ╚═══════════════════════════════════════════════════════════════════════╝
-```
-
-**The order is the security argument.** A downgrading provider can produce proofs that are *internally valid* — correct proofs about the wrong circuit. Checking the commitment **before** the proof, and reporting the two failures as distinct outcomes, is what turns "verification failed" into "you swapped the model". `tvc demo` demonstrates exactly this attack being caught.
+Verification needs the ledger, the weights, and the publisher's 32-byte public key. It does not need the publisher to be online, a certificate chain, or a trusted third party.
 
 ---
 
 ## Quick start
 
 ```bash
-git clone <your-remote> && cd w-tvc-protocol
-
-cargo test --workspace          # 41 Rust tests
-cargo build --release
-./target/release/tvc demo       # full lifecycle + a caught forgery
+cargo test          # 87 tests
+cargo run --bin tvc -- demo
 ```
 
-The demo runs a real ceremony, a real proof, and a real rejection in about a second:
+`tvc demo` runs the whole flow into `demo-out/`: it simulates a model, commits to its weights, signs the registration, appends it to a ledger, verifies the entry, opens a single weight against the commitment, then substitutes one weight out of ninety-six and confirms the registry rejects it.
 
-```
-== Phase 1: Genesis Setup Ceremony ==
-  committed digest  61bdcdf664b14d77555299d35c2492a76db019784912c28b1473c0cde554fa31
-  transcript chain  verified
-  entropy burned    128 bytes
-
-== Phase 2: honest runtime inference ==
-  wallet verdict    ACCEPTED
-
-== Phase 2 under attack: silent model downgrade ==
-  rogue proof is internally valid against its own key: true
-  wallet verdict    REJECTED
-    committed       61bdcdf664b14d77555299d35c2492a76db019784912c28b1473c0cde554fa31
-    runtime         a98085007f1e3e82d52257aacebaac75aecf7a2ef5e7adc43721d48b3ce7d824
-
-  A valid proof about the wrong model is still refused, because the
-  commitment is checked before the proof. This is the downgrade defence.
-```
-
-### The full operator flow
+For the same flow as library calls rather than CLI output:
 
 ```bash
-export TVC_SECRET_KEY=$(openssl rand -hex 32)      # never passed in argv
-
-tvc ceremony --model-id acme-llm-7b --version 2026.09 \
-             --participant bitshala \
-             --participant acme-labs \
-             --participant independent-auditor \
-             --out ceremony-out
-
-tvc commit  --setup ceremony-out                   # BIP-340 sign → commitment.json
-tvc prove   --setup ceremony-out --weight 7 --bias 3 --input 11
-tvc verify  --setup ceremony-out --digest $(cat ceremony-out/vk_digest.hex)
-tvc audit   --setup ceremony-out                   # re-derive digest from the key
+cargo run --example register_model
 ```
 
-### Publishing to Nostr
-
-A commitment must exist before it can be broadcast. `tvc demo` writes one to
-`demo-out/honest/commitment.json` and prints the throwaway key that signed it;
-the operator flow above writes one to `ceremony-out/commitment.json`. Either works.
+### Registering a real model
 
 ```bash
-cd nostr-bridge && npm install
+# 1. Generate a publisher identity. The secret key is printed once, never stored.
+cargo run --bin tvc -- keygen
+export TVC_SECRET_KEY=<the secret key it printed>
 
-# after `tvc demo` — it prints the matching export line for you
-export TVC_SECRET_KEY=<the key tvc demo printed>
-npm run broadcast -- --commitment ../demo-out/honest/commitment.json
+# 2. Inspect a commitment without registering anything.
+cargo run --bin tvc -- commit --weights model.safetensors
 
-# after the operator flow, using your real ceremony key
-npm run broadcast -- --commitment ../ceremony-out/commitment.json        # dry run
-npm run broadcast -- --commitment ../ceremony-out/commitment.json --live
-
-npm run fetch -- --address acme-llm-7b:2026.09 --author <consortium-pubkey>
+# 3. Commit, sign, and append to the registry.
+cargo run --bin tvc -- register \
+  --weights model.safetensors \
+  --model-id meta-llama/Llama-3.2-1B \
+  --version 1.0.0 \
+  --registry registry.jsonl
 ```
 
-`TVC_SECRET_KEY` must be the **same key** that signed the commitment, so the Nostr
-event and the BIP-340 signature inside it resolve to one identity. Without it the
-bridge generates an ephemeral key, still produces a valid event, and warns that a
-wallet pinned to the ceremony key will ignore it.
+### Verifying as a consumer
 
-`broadcast` **simulates by default** and prints the exact wire payload. `--live` is required to touch a relay, and it refuses to publish if the Nostr key does not match the BIP-340 signer inside the commitment — publishing a commitment from an identity a wallet is not pinned to is a silent no-op, so the tool treats it as an error rather than letting you believe you shipped.
+```bash
+# Signature only: proves somebody signed this claim.
+cargo run --bin tvc -- verify --model-id meta-llama/Llama-3.2-1B --registry registry.jsonl
+
+# Pin the publisher and re-derive C from the weights on disk. This is the real check.
+cargo run --bin tvc -- verify \
+  --model-id meta-llama/Llama-3.2-1B \
+  --registry registry.jsonl \
+  --publisher <publisher public key> \
+  --weights model.safetensors
+
+# Re-derive every digest in the ledger and print its head.
+cargo run --bin tvc -- audit --registry registry.jsonl
+```
+
+Every verification failure exits non-zero with a message naming what failed, so this works in a build gate.
 
 ---
 
-## How this scores against the rubric
+## Architecture
 
-### Innovation
+```
+  model.safetensors
+         │
+         ▼
+  ┌──────────────┐   quantise to fixed point, map into BN254's scalar field
+  │ commitment   │
+  │  scheme      │   VectorCommitment over a bare [FieldElement]
+  │  layer       │   → scheme commitment (merkle root + length)
+  │  ─────────   │
+  │  protocol    │   bind scheme ‖ scheme_commitment ‖ length
+  │  layer       │        ‖ fractional_bits ‖ manifest_digest
+  └──────┬───────┘
+         │  C  (32 bytes, always — it is a tagged hash)
+         ▼
+  ┌──────────────┐   payload = (model_id, version, C, timestamp)
+  │ signer       │   BIP-340 Schnorr over secp256k1
+  └──────┬───────┘
+         │  (payload, signature, publisher pubkey)
+         ▼
+  ┌──────────────┐   append-only JSON Lines, one record per line
+  │ registry     │   each record digests the one before it
+  └──────────────┘
+```
 
-The novel claim is **structural, not incremental**: model integrity does not need a per-inference authority. Existing approaches all keep something on the hot path — an enclave quote, an attestation server, a reputation oracle. W-TVC observes that a Groth16 verifying key is a *function of circuit shape alone*, which makes it a legitimate permanent identity for a model version. Once that is true, the entire runtime trust apparatus collapses into a 32-byte constant, and a 32-byte constant is small enough to live on a censorship-resistant broadcast layer forever.
-
-Three pieces that are individually known — trusted setup, addressable Nostr events, BIP-340 — compose into something that is not: **AI model identity with no issuing authority**. The consortium's ceremony key and its Nostr identity are literally the same secp256k1 key, so there is no certificate chain, no registry, and nothing to revoke.
-
-### Completeness
-
-Both phases are implemented and tested end to end, across two languages, with the artefacts of one consumed by the other.
-
-| | |
+| Module | Role |
 |---|---|
-| Rust | 2,431 lines across `tvc-core` + `tvc-cli` |
-| TypeScript | 563 lines in `nostr-bridge` |
-| Tests | 40 Rust unit + 1 doctest + 8 TypeScript = **49 passing** |
-| Warnings | zero (`missing_docs = "deny"`, `unsafe_code = "forbid"`) |
-| Dependencies | 10 direct Rust crates, 1 runtime npm package |
+| `tvc-core/src/commitment.rs` | Weight loading, quantisation, `C = Commit(W)`, Merkle openings. |
+| `tvc-core/src/signer.rs` | Publisher keypairs, registration payload, BIP-340 attestations. |
+| `tvc-core/src/registry.rs` | The append-only, hash-chained public ledger. |
+| `tvc-core/src/digest.rs` | BIP-340 tagged hashing and domain separation. |
+| `tvc-core/src/hex.rs` | Strict lowercase hex codec used on every boundary. |
+| `tvc-core/src/error.rs` | The error taxonomy. |
+| `tvc-cli/src/main.rs` | The `tvc` command line; the only place randomness and secrets enter. |
 
-Real cryptography throughout: Groth16 over BN254 via `arkworks`, BIP-340 Schnorr over secp256k1 via `rust-bitcoin`, tagged SHA-256 via `bitcoin_hashes`, volatile zeroization via `zeroize`. Nothing in the verification path is stubbed.
+### Why the commitment is split into two layers
 
-### Use case
+`VectorCommitment` commits to a bare `&[FieldElement]` and knows nothing about
+tensors. The protocol binding — scheme tag, element count, quantisation scale,
+tensor manifest — lives above it in `WeightCommitment`.
 
-**Machine Money.** An agent holding a budget needs to know the model authorising its spend is the one it is paying for. W-TVC makes downgrade fraud detectable by the payer instead of auditable only by the seller. Bitcoin is the money that does not ask who you are; this is the model attestation that does not ask who you are either.
+The payoff is that **`C` is always 32 bytes whatever the scheme**, because it is
+always a tagged hash *over* the scheme's commitment rather than the scheme's
+commitment itself. A KZG or Pedersen backend has a group element where the Merkle
+root is, and `signer.rs` and `registry.rs` never notice. The tensor manifest also
+correctly leaves the trait: a polynomial commitment has no notion of a tensor.
 
-**Freedom Stack.** The commitment is a signed object, not a hosted record. Relays are interchangeable, and a relay that censors a commitment accomplishes nothing because any other relay serves the identical signed bytes. There is no issuer to subpoena and no registry to capture.
+### Why the commitment is a three-stage pipeline
 
-The concrete scenario driving the design: a UPI payment agent in India authorising a ₹4,200 transaction. The wallet resolves the digest once, caches it, and every later verification is local arithmetic — which matters on a phone, on a patchy connection, where a round trip to an attestation service is a failure mode.
+```
+  tensors ──quantise──> field vector ──commit──> scheme commitment ──bind──> C
+```
 
-### Scope
+**Quantise** throws away what must not matter. Committing to `f32` bit patterns would make the commitment hostage to them: `-0.0` and `0.0` are the same weight but different bytes, as are two NaN payloads. Fixed-point integers are also the representation an arithmetic circuit will want later, which is why the weight vector lives in BN254's scalar field — the commitment made today is over the same vector a circuit will read tomorrow.
 
-Deliberately narrow and honest about it. This repository ships the **protocol**: ceremony, commitment, transport, verification. It does not ship a production ZK-ML proving stack, because doing that credibly is a multi-year effort and claiming otherwise in a hackathon README would be the fastest way to lose an expert judge.
+**Commit** makes the commitment *openable*. A publisher can prove `W[i] = v` against a registered `C` without shipping the model. Openings are canonical: direction comes from the index and the step count is recomputed from the committed length, so there is exactly one accepting proof of any given fact, and a path with a step inserted or removed is rejected on shape rather than hashed into some other root.
 
-What that buys is a clean seam. The circuit is the one component a production deployment replaces, and **nothing downstream of it changes** — not the digest derivation, not the burn, not the signature, not the event format, not the wallet check. The protocol is the contribution; the circuit is a parameter.
+**Bind** closes the gaps the root alone leaves. `C` is a tagged hash over the tree root *plus* the element count, the fractional-bit scale, and a digest of the tensor manifest. Without the manifest, a `[2, 3]` tensor and a `[3, 2]` tensor holding the same numbers would commit identically.
 
-### UI/UX
+Tensors are concatenated in **lexicographic name order**, not file order — file order is an artefact of whatever wrote the checkpoint, so sorting is what lets two honest publishers of the same model reach the same `C`.
 
-This is infrastructure, so the interface is a CLI and a wallet verdict — and both are designed rather than defaulted.
+### Why BIP-340 Schnorr rather than ECDSA
 
-- **A rejection tells you which attack happened.** "Model substitution detected" and "the pairing check failed" are different messages with different remediation, because collapsing them into "invalid" is precisely how a downgrade hides.
-- **Secrets never enter argv.** `TVC_SECRET_KEY` comes from the environment; process arguments are world-readable via `/proc` and land in shell history. The error message when it is unset tells you how to generate one.
-- **Every command ends by printing the next one.** `ceremony` → `commit` → `broadcast` is discoverable without the README open.
-- **Destructive and outward-facing actions are opt-in.** Broadcasting simulates unless you pass `--live`.
-- **Exit codes are real** (`0` accept, `1` reject), so `tvc verify` drops into a CI pipeline or a shell conditional unchanged.
+Three reasons, in order of weight:
 
-The wallet-facing surface reduces to one line a non-technical user can act on — *this response came from the model you are paying for*, or *it did not* — with the digest available for anyone who wants to check it themselves.
+- **Non-malleable.** ECDSA admits a second valid signature for the same message and key by negating `s`. In an append-only registry that means one attestation can be republished as two distinct-looking records.
+- **Canonical 64-byte encoding.** ECDSA's DER is a parsing minefield with a long history of signature-mutation bugs.
+- **Linear.** A consortium of labs can later co-sign one registration as a single aggregate key with no change to what a verifier does.
 
-### Demo
+### Why a hash-chained flat file rather than SQLite
 
-`tvc demo` is the demo: one command, no arguments, no configuration, no network. It runs a genuine ceremony, proves a genuine inference, then **mounts the actual attack** — a second ceremony standing in for a downgraded model — and shows the rogue proof being accepted against its own key and refused against the committed one. The interesting frame for a judge is that the forgery is not malformed. It is a perfectly valid proof, rejected for the right reason.
+Append-only is a *policy* that no filesystem enforces. A line-delimited file has no in-place update operation, so the ordinary way to change history is to rewrite the file — a visible act — rather than `UPDATE ... WHERE`, an invisible one. It also diffs, greps, tails and replicates with tools an auditor already has.
+
+Each record carries the digest of the record before it. Editing, reordering or deleting any record changes every digest after it, and `verify_chain` reports the exact line where the divergence starts. This does not make tampering impossible — a determined editor can recompute the whole chain. It makes tampering **detectable by anyone who saw an earlier head**, which is what turns a file into a ledger.
+
+SQLite is the right answer once this registry serves concurrent writers. It is the wrong answer today: it would put a mutable B-tree under an append-only claim.
+
+Until then a second writer is **refused rather than tolerated**. An exclusive advisory lock serialises the append, and under that lock the file's length is compared against what the handle last read. The length check is the part that matters: a record's sequence number and `previous` digest come from state read earlier, so the lock alone would not help — two processes can each read a ledger of N records, queue on the lock, and both append at sequence N. Six concurrent `tvc register` processes against one ledger produce two successes and four clean failures, not six lines and a forked chain.
 
 ---
 
 ## What is real, and what is scaffolding
 
-Stated plainly, because a protocol that asks to be trusted should not have to be reverse-engineered to find its limits. This section is duplicated in the crate-level rustdoc.
+Honesty about scope is load-bearing for a protocol that asks to be trusted.
 
-**Real, and exercised by the test suite**
+**Real, and exercised by the test suite.**
 
-- Groth16 setup, proving, and verification over BN254 (`arkworks` 0.4)
-- BIP-340 Schnorr signing and verification over secp256k1 (`rust-bitcoin` 0.33)
-- Tagged, length-prefixed, domain-separated SHA-256 matching the BIP-340 construction
-- Hash-chained ceremony transcript, with reorder and truncation both caught by tests
-- Volatile zeroization of setup entropy across the full allocation capacity
-- Commitment-before-proof verification order, including a test that a validly-proven substituted model is rejected
-- Cross-language integration: the Rust CLI's BIP-340 signer key and the bridge's Nostr pubkey resolve to one identity
+- BIP-340 Schnorr signing and verification over secp256k1.
+- Tagged, length-prefixed, domain-separated hashing, checked against the BIP-340 reference construction.
+- safetensors parsing with full range validation — truncated files, oversized header lengths, and shapes that disagree with their byte ranges are all rejected rather than read short.
+- Deterministic fixed-point quantisation into the BN254 scalar field, including the negative-value mapping and the `2^53` exact-integer bound.
+- The SHA-256 Merkle vector commitment and its canonical openings, including rejection of an opening moved to another index, shortened, or padded with an extra step.
+- The ledger's hash chain, including detection of edited, deleted and reordered records, of an unknown format version, and of an append from a stale handle.
 
-**Scaffolding, with the upgrade path documented in-tree**
+**Scaffolding, with a documented upgrade path.**
 
-- **The circuit** (`circuit.rs`) is an affine relation over `Fr`, not a neural network. It enforces the right *shape* of claim — one parameter pair must explain both the computation and the public commitment — but over four constraints instead of a weight tensor. Production replaces it with a quantised arithmetic circuit plus a Poseidon or Merkle commitment to the real weights.
-- **The ceremony** (`mpc_setup.rs`) aggregates participant entropy into one seed on one machine. It is **not** a Phase-2 MPC. The honest security claim today is *"trust the operator, audit the transcript"*, not the 1-of-N claim a real MPC delivers. A true Phase-2 ceremony has each participant apply their contribution locally, publish a proof of correct contribution, and destroy their own share; the interfaces here are shaped for that substitution.
+- `MerkleVectorCommitment` is a hash-based vector commitment, not a succinct one. Openings are `O(log n)` rather than constant-size. `VectorCommitment` is the seam where KZG or Pedersen goes; nothing outside `commitment.rs` sees a tree.
+- The tree hash is SHA-256, which is bitwise and costs tens of thousands of constraints per compression to verify inside an arithmetic circuit. The BN254 field encoding means the vector needs no re-encoding when a circuit arrives; it does not by itself make anything circuit-efficient. A field-native hash (Poseidon) is the change that would, and it is deferred until the proving system is chosen.
+- The tree is held in memory, so this phase targets models in the tens of millions of parameters. `MerkleProver` keeps the levels so repeated openings are `O(log n)`, but streaming and memory-mapped trees are what lift the ceiling — and they change no interface here.
+- **ONNX ingestion is not implemented.** `Tensor` is the interface a loader produces, and only safetensors has one today. ONNX is protobuf, and a protobuf parser is a dependency this phase deliberately does not take.
+- The registry is a local file. Replication, and publishing the head digest somewhere a consumer can independently see it, are out of scope for this phase.
+- Single-writer is the supported mode. Concurrent writers are detected and refused, not merged.
+
+**Not in this repository at all.** The arithmetic circuit and the proving system.
+
+---
 
 ## Threat model
 
-**Defended.** Silent model substitution and token downgrading. Tampered public outputs. Forged or altered parameter commitments (BIP-340 over every field). Commitments from an unpinned key. Relay censorship and relay-level tampering. Transcript reordering, truncation, and extension.
+**What a registration establishes.** One lab, holding one key, asserted that a named model version has weight commitment `C` at a claimed time. The registry refuses to store an attestation whose signature does not verify, so every record in a well-formed ledger is signed by the key it names.
 
-**Not defended, and why**
+**What it does not establish.**
 
-| Gap | Status |
+- **Name ownership.** Two publishers can register the same `model_id` under different keys, exactly as two people can claim a username on two different servers. A registry cannot adjudicate this. Consumers resolve it by *pinning a key* — `verify_model_registration_by` — not by trusting the registry's ordering. There is an integration test asserting that a bare signature check passes for a rival's registration, because that is precisely why a bare check is not enough.
+- **Weight quality.** `C` says which weights, not whether they are any good.
+- **Timestamps.** The registry has no way to check a publisher's clock and does not pretend to. The timestamp is part of what was signed, so it is exactly as trustworthy as the key that signed it.
+- **Rollback.** Truncating the ledger yields a shorter but internally valid history. This is caught by holding an earlier head, not by the chain itself — there is a test pinning that limitation in place.
+- **Anything in a ledger line this build does not recognise.** Unknown JSON fields are ignored so that a record written by a later version still opens here, and they are covered by neither the digest nor the signature. They are inert by construction and nothing should read them. An unknown *format version*, by contrast, is a hard stop: a reader that cannot reproduce a digest cannot honestly call the record verified.
+
+**The bound quantisation puts on the claim.** Rounding to a fixed scale means two *different* models commit to the same `C` if they differ by less than half a step. At the default of 16 fractional bits the step is `2^-16 ≈ 1.5e-5`.
+
+This cuts both ways, and the direction is easy to get backwards. The step is far **finer** than `bf16` precision (ULP ≈ `7.8e-3` near 1.0), so quantisation does **not** make `C` stable across dtype re-encoding — an `f32` checkpoint re-saved as `bf16` moves by hundreds of steps and commits to a different `C`. What the scale absorbs is only sub-step noise, such as the last-bit differences between two equivalent `f32` computations.
+
+Whether that is right depends on what you want `C` to name. Committing to the weights *as stored* is the defensible default — a `bf16` copy is a different artefact — but a publisher shipping the same model in several dtypes must register each one. The scale is committed inside `C`, so a verifier can always see which claim was made.
+
+---
+
+## Dependencies
+
+Six crates, each load-bearing:
+
+| Crate | Why |
 |---|---|
-| A ceremony operator who retains the combined entropy | The Phase-2 MPC upgrade above. Today's mitigation is an auditable transcript and an ephemeral ceremony machine. |
-| Register and stack residue during setup | `arkworks` copies field elements internally, outside any destructor's reach. Run the ceremony on a machine you destroy afterwards. |
-| Swap, hibernation, core dumps | Disable both for the ceremony process. `panic = "abort"` means destructors do not run on panic, so core-dump hygiene is what covers that path. |
-| Descriptor tampering between `ceremony` and `commit` | Caught. The recorded model-binding digest is recomputed at signing time and must match. |
-| A model whose *weights* change without a new ceremony | Out of scope by construction. The circuit binds parameters to the commitment; binding the commitment to real-world model behaviour needs the production circuit. |
-| Kind 30200 is addressable, so a later event replaces an earlier one | A deliberate trade for lookup by `model:version`. `npm run fetch` warns when relays serve divergent digests for one address. Wallets should pin the digest on first use. |
+| `secp256k1`, `bitcoin_hashes` | Consensus-grade primitives; hand-rolling either would be reckless. |
+| `zeroize` | Signing keys must not linger in freed memory. |
+| `serde`, `serde_json` | The ledger and the safetensors header are both JSON read back from untrusted disk. A parser on that boundary is exactly what should not be homegrown. |
+| `fs2` | Advisory file locking. A sidecar lockfile is orphaned by a crash or a `SIGKILL` and then needs deleting by hand; an OS lock lives on the file descriptor and the kernel releases it however the process dies. Raw `flock` is not an option because `tvc-core` forbids unsafe code. |
+
+Hex stays in-tree (`tvc_core::hex`): forty auditable lines, and every digest a verifier acts on passes through it. The CLI adds `clap` and `getrandom`.
+
+---
 
 ## Repository layout
 
 ```
 .
-├── Cargo.toml              workspace: shared versions, hardened release profile
-├── tvc-core/               the cryptographic core, no I/O
-│   └── src/
-│       ├── lib.rs          crate docs, module map, end-to-end doctest
-│       ├── circuit.rs      the committed inference relation (R1CS)
-│       ├── mpc_setup.rs    Phase 1: ceremony, transcript, digest derivation
-│       ├── crypto_burn.rs  toxic-waste destruction and burn attestation
-│       ├── proof_verifier.rs  Phase 2: proving, verification, BIP-340 commitments
-│       ├── digest.rs       BIP-340 tagged hashing, domain separation
-│       ├── hex.rs          strict lowercase hex codec
-│       └── error.rs        error taxonomy
-├── tvc-cli/                the `tvc` binary
-│   └── src/
-│       ├── main.rs         ceremony · commit · prove · verify · audit · demo
-│       └── json.rs         dependency-free JSON writer
-└── nostr-bridge/           TypeScript, Nostr transport
-    └── src/
-        ├── commitment.ts   strict parsing and validation of commitment.json
-        ├── event.ts        kind 30200 construction and signing
-        ├── broadcast.ts    publish (dry-run by default)
-        ├── fetch.ts        wallet-side resolution and reconciliation
-        └── bridge.test.ts  8 tests
+├── Cargo.toml                       workspace, dependency policy
+├── tvc-core/
+│   ├── src/
+│   │   ├── lib.rs                   crate docs, end-to-end doctest
+│   │   ├── commitment.rs            weight loading, quantisation, C = Commit(W)
+│   │   ├── signer.rs                publisher keys, payload, BIP-340 attestations
+│   │   ├── registry.rs              append-only hash-chained ledger
+│   │   ├── digest.rs                tagged hashing, domain separation
+│   │   ├── hex.rs                   strict lowercase hex codec
+│   │   └── error.rs                 error taxonomy
+│   ├── examples/register_model.rs   end-to-end walkthrough as library calls
+│   └── tests/end_to_end.rs          integration tests
+├── tvc-cli/src/main.rs              the `tvc` binary
+├── .env.example                     TVC_SECRET_KEY template
+└── LICENSE
 ```
 
-## Event specification — kind `30200`
+---
 
-Addressable (NIP-01 range `30000`–`39999`), so a commitment is addressed by `(kind, pubkey, d)` and a wallet resolves the current commitment for a model version without scanning history.
+## Key handling
 
-```jsonc
-{
-  "kind": 30200,
-  "tags": [
-    ["d",          "acme-llm-7b:2026.09"],   // addressable identifier
-    ["vk",         "<64 hex>"],              // the 32-byte verification digest
-    ["model",      "acme-llm-7b"],
-    ["ver",        "2026.09"],
-    ["alg",        "groth16-bn254"],
-    ["transcript", "<64 hex>"],              // ceremony transcript digest
-    ["burn",       "<64 hex>"],              // toxic-waste burn attestation
-    ["signer",     "<64 hex>"],              // x-only consortium key
-    ["bip340",     "<128 hex>"],             // signature over the commitment sighash
-    ["protocol",   "w-tvc/1"],
-    ["t",          "w-tvc"]
-  ],
-  "content": "{ ...the same commitment as JSON... }"
-}
-```
+`tvc-core` has no entropy source and no environment access by design. The CLI is the one place both appear, so the trust boundary is a file you can read rather than a library default you have to take on faith.
 
-The BIP-340 signature is over a tagged sighash of the commitment fields, **independent of Nostr**. The commitment therefore verifies identically whether it arrives from a relay, a web page, or a USB stick — the relay is transport, not authority. `fetch.ts` refuses any event whose tags disagree with its content.
+- Randomness comes from the operating system via `getrandom`, for key generation and for BIP-340 auxiliary randomness.
+- The signing key is read from `TVC_SECRET_KEY`, never from a flag. Command-line arguments are visible in `ps` output and land in shell history; an environment variable is merely bad rather than broadcast.
+- `PublisherKeypair` holds its scalar in a `Zeroizing` buffer, is not `Clone`, is not serialisable, and its `Debug` prints `<redacted>`. The only way out is `expose_secret_hex`, whose name is the warning.
 
-## Design decisions worth defending
-
-- **Tagged hashing everywhere.** Every digest is domain-separated with a BIP-340 tagged hash, and every message part is length-prefixed. Plain concatenation is ambiguous — `("ab","c")` and `("a","bc")` collide — which would let a participant identifier absorb adjacent bytes and forge a transcript entry.
-- **The digest is a pure function of the key.** Model metadata is *not* mixed in. A wallet recomputes the digest from the key it was handed and nothing else; binding key to claimed model identity is the signature's job. Separating them means the arithmetic check needs no metadata.
-- **Signing key from the environment, aux randomness passed explicitly.** The signing path has no hidden entropy source, which makes it reproducible under test and auditable in production.
-- **Model identifiers are validated at the boundary.** `model_id` and `version`
-  accept only ASCII alphanumerics plus `-`, `_` and `.`. Three exclusions have
-  concrete reasons: a `:` would make the `<model_id>:<version>` address ambiguous,
-  so a wallet splitting the Nostr `d` tag would recover a different pair than was
-  frozen; a newline would corrupt the line-delimited descriptor file, letting a
-  ceremony be signed under an identity it never froze; whitespace and control
-  characters let two identical-looking identifiers hash differently. Rejecting at
-  the boundary is cheaper than making every consumer defensive.
-- **The commitment is bound to the ceremony, not to a text file.** `tvc ceremony`
-  records a digest over the full descriptor, and `tvc commit` recomputes it from
-  what it read back and refuses to sign on mismatch. Identity cannot drift between
-  freezing a key and signing the claim about it, whatever the cause.
-- **Ten Rust dependencies, one npm runtime dependency.** Hex and JSON are ~40 auditable lines each rather than transitive trees, because they sit on the trust boundary.
+---
 
 ## Roadmap
 
-1. Phase-2 MPC with per-participant contribution proofs → genuine 1-of-N trust
-2. Quantised inference circuit over a real weight tensor, with a Poseidon commitment
-3. `SPOT Wallet` reference consumer: resolve, pin on first use, verify offline
-4. NIP draft for kind 30200 submitted to `nostr-protocol/nips`
-5. Recursive proof aggregation so a batch of inferences verifies in one pairing check
+1. **This phase — setup and registry.** Weight commitments, publisher attestations, append-only ledger. Done.
+2. **Openings at scale.** Swap `MerkleVectorCommitment` for KZG behind the existing `VectorCommitment` trait, for constant-size and circuit-friendly openings.
+3. **Scale.** Streaming leaf construction and a memory-mapped tree, to lift the in-memory ceiling past tens of millions of parameters.
+4. **ONNX ingestion.** A second loader producing `Tensor`, so the commitment scheme is unchanged.
+5. **Circuit registration.** Register the arithmetic circuit for a model alongside its weights, committing to the relation as well as the parameters. This is also when the tree hash should move to Poseidon.
+6. **Runtime proofs.** Prove an inference was served by the committed weights. This is where the commitment made in step 1 gets used — and why the weight vector already lives in BN254's scalar field.
+7. **Distribution.** Replicate the ledger and publish the head digest somewhere a consumer can independently see it — a CT-style signed tree head, anchored periodically to a public chain.
+
+---
 
 ## License
 
-MIT. See [`LICENSE`](LICENSE).
+MIT. See [LICENSE](LICENSE).

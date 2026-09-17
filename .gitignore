@@ -1,8 +1,8 @@
 # ---------------------------------------------------------------------------
 # Secrets and key material — highest priority, listed first and deliberately
-# broad. A ceremony repository that leaks a signing key is worse than useless:
-# an attacker who holds it can sign parameter commitments for models that never
-# went through a ceremony, and every wallet pinned to that key will believe them.
+# broad. A registry repository that leaks a publisher's signing key is worse
+# than useless: an attacker who holds it can sign registrations for weights that
+# were never published, and every consumer pinned to that key will believe them.
 # ---------------------------------------------------------------------------
 *.key
 *.pem
@@ -16,22 +16,14 @@
 *.secret
 *.seed
 *.entropy
-
-# Nostr and Bitcoin key encodings, in every spelling we could think of.
-nsec*
-*nsec*
-*.nsec
 privkey*
 *privkey*
 priv_key*
 secret_key*
 secretkey*
 seckey*
-*.xprv
-xprv*
 mnemonic*
 seed_phrase*
-wallet.dat
 
 # Environment files. .env.example is explicitly re-included below.
 .env
@@ -40,27 +32,23 @@ wallet.dat
 !.env.example
 
 # ---------------------------------------------------------------------------
-# Ceremony artefacts and toxic waste.
-# Structural keys are reproducible from a transcript and are large; entropy must
-# never reach disk at all. Anything a ceremony writes stays local by default.
+# Model weights and demo output.
+# Checkpoints are large and are not this repository's to redistribute; the
+# registry commits to weights, it does not store them.
 # ---------------------------------------------------------------------------
-ceremony-out/
+*.safetensors
+*.onnx
+*.gguf
+*.bin
+*.pt
+*.pth
 demo-out*/
-*-ceremony-out/
-toxic*
-*toxic*
-waste/
-contributions/
-*.ptau
-*.zkey
-proving_key.bin
-verifying_key.bin
-proof.bin
-public_inputs.txt
-commitment.json
-transcript.json
-*_digest.hex
-vk_digest.hex
+example-out/
+
+# A ledger produced by running the demo or the examples at the repository root.
+# A registry you intend to publish lives at an explicit path and can be added
+# with `git add -f`.
+/registry.jsonl
 
 # ---------------------------------------------------------------------------
 # State, logs, and scratch output.
@@ -68,7 +56,6 @@ vk_digest.hex
 *.log
 logs/
 *.pid
-*.seed.json
 state/
 .state
 *.sqlite
@@ -88,21 +75,6 @@ target/
 **/*.rs.bk
 *.pdb
 .cargo/config.toml
-
-# ---------------------------------------------------------------------------
-# Node and TypeScript.
-# ---------------------------------------------------------------------------
-node_modules/
-dist/
-build/
-coverage/
-.npm
-.yarn/
-.pnp.*
-*.tsbuildinfo
-npm-debug.log*
-yarn-error.log*
-pnpm-debug.log*
 
 # ---------------------------------------------------------------------------
 # Editors and operating systems.

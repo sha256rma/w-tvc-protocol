@@ -1,4 +1,4 @@
-//! Domain-separated hashing for every commitment the protocol publishes.
+//! Domain-separated hashing for every commitment this crate publishes.
 //!
 //! # Tagged hashing
 //!
@@ -9,38 +9,39 @@
 //! ```
 //!
 //! The doubled tag hash fills a full SHA-256 block, so the midstate after the
-//! prefix is fixed per tag. The security property that matters here is domain
-//! separation: a verifying-key digest and a ceremony-transcript digest are both
-//! 32 bytes over caller-controlled input, and without distinct tags an adversary
-//! could try to present one as the other. Reusing Bitcoin's own construction,
-//! rather than inventing a scheme, keeps W-TVC digests auditable by anyone who
-//! already knows BIP-340.
+//! prefix is fixed per tag. The property that matters here is domain separation:
+//! a weight-commitment root, a Merkle internal node, and a ledger record digest
+//! are all 32 bytes over caller-controlled input. Without distinct tags an
+//! adversary could present one as another — most sharply, offer a Merkle *leaf*
+//! as if it were an internal node and claim a subtree that was never committed.
+//! Reusing Bitcoin's construction rather than inventing one keeps these digests
+//! auditable by anyone who already knows BIP-340.
 //!
 //! # Length prefixing
 //!
 //! Each message part is prefixed with its length as a big-endian `u64` before
 //! being absorbed. Plain concatenation is ambiguous — `("ab", "c")` and
-//! `("a", "bc")` hash identically — which would let a participant identifier
-//! absorb bytes from an adjacent field and forge a transcript entry that appears
-//! to commit to something it does not. Length prefixing makes the encoding
-//! injective, so one digest corresponds to exactly one tuple of inputs.
+//! `("a", "bc")` hash identically — which would let a model identifier absorb
+//! bytes from an adjacent field and produce a signature that appears to commit to
+//! something it does not. Length prefixing makes the encoding injective, so one
+//! digest corresponds to exactly one tuple of inputs.
 
 use bitcoin_hashes::{sha256, HashEngine};
 
-/// Tag for the aggregated ceremony RNG seed.
-pub const DOMAIN_CEREMONY_SEED: &str = "W-TVC/v1/ceremony-seed";
-/// Tag for an individual participant's entropy commitment.
-pub const DOMAIN_CONTRIBUTION: &str = "W-TVC/v1/contribution";
-/// Tag for the running ceremony transcript hash chain.
-pub const DOMAIN_TRANSCRIPT: &str = "W-TVC/v1/transcript";
-/// Tag binding a model descriptor to its ceremony.
-pub const DOMAIN_MODEL_BINDING: &str = "W-TVC/v1/model-binding";
-/// Tag for the 32-byte functional verification digest of a verifying key.
-pub const DOMAIN_VK_DIGEST: &str = "W-TVC/v1/vk-digest";
-/// Tag for the toxic-waste burn attestation.
-pub const DOMAIN_BURN_ATTESTATION: &str = "W-TVC/v1/burn-attestation";
-/// Tag for the BIP-340 sighash over a published parameter commitment.
-pub const DOMAIN_COMMITMENT_SIGHASH: &str = "W-TVC/v1/commitment-sighash";
+/// Tag for a single quantised weight at its position in the vector.
+pub const DOMAIN_WEIGHT_LEAF: &str = "W-TVC/v1/weight-leaf";
+/// Tag for an internal node of the weight Merkle tree.
+pub const DOMAIN_WEIGHT_NODE: &str = "W-TVC/v1/weight-node";
+/// Tag for the final weight commitment binding root, length and manifest.
+pub const DOMAIN_WEIGHT_ROOT: &str = "W-TVC/v1/weight-root";
+/// Tag for the digest over tensor names, dtypes and shapes.
+pub const DOMAIN_TENSOR_MANIFEST: &str = "W-TVC/v1/tensor-manifest";
+/// Tag for the BIP-340 sighash over a model registration payload.
+pub const DOMAIN_REGISTRATION_SIGHASH: &str = "W-TVC/v1/registration-sighash";
+/// Tag for the append-only registry's record hash chain.
+pub const DOMAIN_LEDGER_CHAIN: &str = "W-TVC/v1/ledger-chain";
+/// Tag for deriving a publisher signing scalar from caller-supplied entropy.
+pub const DOMAIN_PUBLISHER_KEY: &str = "W-TVC/v1/publisher-key";
 
 /// Computes a BIP-340 tagged hash over length-prefixed message parts.
 pub fn tagged_hash(tag: &str, parts: &[&[u8]]) -> [u8; 32] {
@@ -58,9 +59,9 @@ pub fn tagged_hash(tag: &str, parts: &[&[u8]]) -> [u8; 32] {
 
 /// Folds a new element into a running hash chain.
 ///
-/// Used to build the ceremony transcript so that each entry commits to every
-/// entry before it. Truncating or reordering contributions changes the final
-/// digest, which is what makes the published transcript auditable after the fact.
+/// Used to build the registry ledger so that each record commits to every record
+/// before it. Truncating, reordering, or editing an entry changes the head
+/// digest, which is what makes an append-only file auditable after the fact.
 pub fn chain(tag: &str, previous: &[u8; 32], element: &[u8]) -> [u8; 32] {
     tagged_hash(tag, &[previous.as_slice(), element])
 }
@@ -73,30 +74,38 @@ mod tests {
     fn distinct_tags_separate_identical_messages() {
         let message: &[u8] = b"same bytes";
         assert_ne!(
-            tagged_hash(DOMAIN_VK_DIGEST, &[message]),
-            tagged_hash(DOMAIN_TRANSCRIPT, &[message])
+            tagged_hash(DOMAIN_WEIGHT_LEAF, &[message]),
+            tagged_hash(DOMAIN_WEIGHT_NODE, &[message])
         );
     }
 
     #[test]
     fn length_prefixing_removes_concatenation_ambiguity() {
         assert_ne!(
-            tagged_hash(DOMAIN_TRANSCRIPT, &[b"ab", b"c"]),
-            tagged_hash(DOMAIN_TRANSCRIPT, &[b"a", b"bc"])
+            tagged_hash(DOMAIN_REGISTRATION_SIGHASH, &[b"ab", b"c"]),
+            tagged_hash(DOMAIN_REGISTRATION_SIGHASH, &[b"a", b"bc"])
         );
     }
 
     #[test]
     fn chain_is_order_dependent() {
         let base = [0u8; 32];
-        let forward = chain(DOMAIN_TRANSCRIPT, &chain(DOMAIN_TRANSCRIPT, &base, b"a"), b"b");
-        let reverse = chain(DOMAIN_TRANSCRIPT, &chain(DOMAIN_TRANSCRIPT, &base, b"b"), b"a");
+        let forward = chain(
+            DOMAIN_LEDGER_CHAIN,
+            &chain(DOMAIN_LEDGER_CHAIN, &base, b"a"),
+            b"b",
+        );
+        let reverse = chain(
+            DOMAIN_LEDGER_CHAIN,
+            &chain(DOMAIN_LEDGER_CHAIN, &base, b"b"),
+            b"a",
+        );
         assert_ne!(forward, reverse);
     }
 
     #[test]
     fn matches_bip340_reference_construction() {
-        let tag = "W-TVC/v1/vk-digest";
+        let tag = "W-TVC/v1/weight-root";
         let tag_digest = sha256::Hash::hash(tag.as_bytes()).to_byte_array();
         let mut engine = sha256::Hash::engine();
         engine.input(&tag_digest);

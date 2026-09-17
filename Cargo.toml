@@ -3,7 +3,7 @@ members = ["tvc-core", "tvc-cli"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.75"
 license = "MIT"
@@ -11,17 +11,30 @@ repository = "https://github.com/sha256rma/w-tvc-protocol"
 homepage = "https://github.com/sha256rma/w-tvc-protocol"
 authors = ["W-TVC Protocol Contributors"]
 
+# Dependency policy for this phase: six crates, each load-bearing.
+#
+#   secp256k1 / bitcoin_hashes  the signature scheme and hash are consensus-grade
+#                               primitives; hand-rolling either would be reckless.
+#   zeroize                     signing keys must not linger in freed memory.
+#   serde / serde_json          the registry ledger and the safetensors header are
+#                               both JSON read back from untrusted disk. A parser on
+#                               that boundary is exactly what should not be homegrown.
+#   fs2                         advisory file locking. The alternative is a sidecar
+#                               lockfile, which a crash or a SIGKILL orphans and a
+#                               human then has to delete; an OS lock lives on the
+#                               file descriptor and the kernel releases it however
+#                               the process dies. Raw `flock` is not an option here
+#                               because `tvc-core` forbids unsafe code.
+#
+# Hex stays in-tree (`tvc_core::hex`): forty auditable lines, and every digest a
+# verifier acts on passes through it.
 [workspace.dependencies]
-ark-bn254 = { version = "0.4", default-features = false, features = ["curve"] }
-ark-ff = { version = "0.4", default-features = false }
-ark-groth16 = { version = "0.4", default-features = false }
-ark-relations = { version = "0.4", default-features = false }
-ark-serialize = { version = "0.4", default-features = false }
-ark-snark = { version = "0.4", default-features = false }
-ark-std = { version = "0.4", default-features = false, features = ["std"] }
 bitcoin_hashes = { version = "1.2", default-features = false, features = ["std"] }
 secp256k1 = { version = "0.33", default-features = false, features = ["std"] }
 zeroize = { version = "1.9", default-features = false, features = ["std", "zeroize_derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+fs2 = "0.4"
 
 [profile.release]
 opt-level = 3

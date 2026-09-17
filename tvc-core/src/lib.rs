@@ -1,44 +1,42 @@
-//! # W-TVC Protocol — Weight Threshold Verification Ceremony
+//! # W-TVC — Verifiable Model Identity: setup and public registry
 //!
-//! Cryptographic core for proving that an AI inference was served by the model
-//! its provider claims, without a hardware TEE, a per-request attestation
-//! service, or any trusted party on the runtime path.
+//! Cryptographic core for binding an AI model's weights to the identity of the
+//! lab that published them, so that anyone holding a copy of a model can check
+//! whether it is the model its publisher attested to.
 //!
 //! ## The problem
 //!
-//! A wallet asking a remote model to authorise a payment has no way to tell which
-//! model answered. The provider can silently route the request to a cheaper
-//! distillation — *token downgrading* — and bill for the flagship. Today the
-//! usual answer is a hardware enclave: trust Intel, AMD, or NVIDIA to vouch for
-//! the binary. That replaces a trusted provider with a trusted silicon vendor,
-//! and a decade of enclave CVEs makes that a poor trade. It also cannot work for
-//! a model served from hardware you do not control.
+//! "This is Llama-3.2-1B" is, today, a filename and a README. Nothing connects a
+//! set of weights to a claim by a named party, so a mirror can serve a
+//! distillation under a flagship name, a fine-tune can be redistributed as the
+//! base model, and a consumer has no way to tell. The usual answer is to trust a
+//! hosting platform's account system — which works exactly as far as that
+//! platform's perimeter, and not one step past it.
 //!
 //! ## The approach
 //!
-//! Move the trust from silicon to arithmetic, and do the expensive part once.
+//! Make the weights themselves the thing that is named, and let a key rather than
+//! a platform do the naming.
 //!
-//! | Phase | When | What happens |
-//! |---|---|---|
-//! | **Genesis** | Once per model version | A ceremony freezes the circuit's structural parameters into a permanent 32-byte digest, destroys the setup entropy, and publishes a signed commitment to Nostr relays. |
-//! | **Runtime** | Every inference | The provider emits a zero-knowledge proof. The wallet fetches the digest from any relay and verifies the proof against it locally. |
+//! | Stage | What happens |
+//! |---|---|
+//! | **Commit** | Weight tensors are quantised to a field vector and reduced to a 32-byte commitment `C`. |
+//! | **Attest** | The publishing lab signs `(model_id, version, C, timestamp)` with a BIP-340 Schnorr signature. |
+//! | **Register** | The signed attestation is appended to a hash-chained, append-only ledger. |
+//! | **Verify** | Anyone recomputes `C` from weights in hand and checks the signature against a pinned publisher key. |
 //!
-//! Groth16's trusted setup depends only on the *shape* of the constraint system,
-//! never on a witness. The shape is fixed by the model architecture, so one
-//! verifying key covers every inference that model version will ever serve. That
-//! is what makes a write-once commitment sufficient and keeps the runtime path
-//! free of any authority to ask.
+//! No step needs a trusted third party at verification time. A consumer needs the
+//! ledger, the weights, and the publisher's 32-byte public key.
 //!
 //! ## Module map
 //!
 //! | Module | Role |
 //! |---|---|
-//! | [`circuit`] | The committed inference relation as an R1CS. |
-//! | [`mpc_setup`] | Phase 1: the ceremony, the transcript, the digest. |
-//! | [`crypto_burn`] | Destruction of setup entropy and its attestation. |
-//! | [`proof_verifier`] | Phase 2: proving, verification, BIP-340 commitments. |
+//! | [`commitment`] | Weight loading, quantisation, and `C = Commit(W)`. Split into a scheme layer ([`commitment::VectorCommitment`]) and a protocol layer ([`commitment::WeightCommitment`]). |
+//! | [`signer`] | Publisher keys, the registration payload, BIP-340 attestations. |
+//! | [`registry`] | The append-only, hash-chained public ledger. |
 //! | [`digest`] | BIP-340 tagged hashing and domain separation. |
-//! | [`hex`] | Strict lowercase hex codec used on the relay boundary. |
+//! | [`hex`] | Strict lowercase hex codec used on every boundary. |
 //! | [`error`] | The error taxonomy. |
 //!
 //! ## What is real and what is scaffolding
@@ -46,96 +44,101 @@
 //! Honesty about scope is load-bearing for a protocol that asks to be trusted, so
 //! this is stated in the code and not only in the README.
 //!
-//! **Real and exercised by the test suite.** Groth16 setup, proving, and
-//! verification over BN254 via `arkworks`. BIP-340 Schnorr signing and
+//! **Real, and exercised by the test suite.** BIP-340 Schnorr signing and
 //! verification over secp256k1. Tagged, length-prefixed, domain-separated
-//! hashing. The hash-chained ceremony transcript and its tamper checks. Volatile
-//! zeroization of setup entropy. The commitment-before-proof verification order,
-//! including a test that a validly-proven *substituted* model is rejected.
+//! hashing. safetensors parsing with full range validation. Deterministic
+//! fixed-point quantisation into the BN254 scalar field. The SHA-256 Merkle
+//! vector commitment and its openings, including rejection of an opening moved to
+//! another index. The append-only ledger's hash chain and its tamper checks,
+//! including detection of edited, deleted and reordered records.
 //!
-//! **Scaffolding, with a documented upgrade path.** Two things.
-//! [`circuit::InferenceCircuit`] is an affine relation over `Fr`, not a neural
-//! network; a production deployment replaces it with a quantised circuit over the
-//! real weight tensor. [`mpc_setup::run_ceremony`] aggregates participant entropy
-//! on one machine rather than running a Phase-2 MPC, so its honest claim today is
-//! "trust the operator, audit the transcript", not 1-of-N. Neither substitution
-//! changes any interface downstream of [`mpc_setup::CeremonyOutput`].
+//! **Scaffolding, with a documented upgrade path.** Four things.
+//! [`commitment::MerkleVectorCommitment`] is a hash-based vector commitment, not
+//! a succinct one; [`commitment::VectorCommitment`] is the seam where KZG or
+//! Pedersen goes when openings need to be constant-size, and because `C` is
+//! always a tagged hash over the scheme's commitment, swapping the scheme never
+//! reaches [`signer`] or [`registry`]. The tree hash is SHA-256, which is
+//! expensive to verify inside an arithmetic circuit; a field-native hash is the
+//! change that fixes that, deferred until the proving system is chosen. ONNX
+//! ingestion is not implemented — [`commitment::Tensor`] is the interface a
+//! loader produces, and only safetensors has one today. And the registry is a
+//! local file: replication, and publishing the head digest somewhere a consumer
+//! can independently see it, are out of scope for this phase.
+//!
+//! **Bounded by design, not by omission.** Openings are `O(log n)` from a
+//! [`commitment::MerkleProver`] but the tree is held in memory, so this phase
+//! targets models in the tens of millions of parameters. Streaming and
+//! memory-mapped trees are what lift that, and they change no interface here.
+//!
+//! **Not in this crate at all.** The arithmetic circuit and the proving system.
+//! This is the setup layer; a commitment made here is the input a circuit will
+//! later read, which is why the weight vector lives in BN254's scalar field.
 //!
 //! ## End-to-end example
 //!
 //! ```
-//! use tvc_core::circuit::InferenceCircuit;
-//! use tvc_core::mpc_setup::{field_from_u64, run_ceremony, ModelDescriptor, ParticipantContribution};
-//! use tvc_core::proof_verifier::{prove_inference, verify_inference, ParameterCommitment};
+//! use tvc_core::commitment::{commit_weights, Quantizer, Tensor, WeightVector};
+//! use tvc_core::registry::{ModelMetadata, ModelRegistry};
+//! use tvc_core::signer::{PublisherKeypair, RegistrationPayload};
 //!
-//! let setup = run_ceremony(
-//!     ModelDescriptor::new("acme-llm-7b", "2026.09", "affine-committed-inference", 7_000_000_000),
-//!     vec![
-//!         ParticipantContribution::new("bitshala", [1u8; 32]),
-//!         ParticipantContribution::new("acme-labs", [2u8; 32]),
-//!     ],
-//! )?;
+//! # let scratch = std::env::temp_dir().join(format!("tvc-doctest-{}", std::process::id()));
+//! # std::fs::create_dir_all(&scratch)?;
+//! # let ledger = scratch.join("registry.jsonl");
+//! // 1. Load and quantise the weights.
+//! let tensor = Tensor::from_f32("layer.0.weight", vec![2, 2], &[0.5, -1.5, 2.0, 0.125])?;
+//! let weights = WeightVector::from_tensors(vec![tensor], Quantizer::default())?;
 //!
-//! assert!(setup.transcript.verify_chain());
+//! // 2. Commit to them.
+//! let commitment = commit_weights(&weights)?;
 //!
-//! let commitment = ParameterCommitment::new(
-//!     "acme-llm-7b",
-//!     "2026.09",
-//!     setup.vk_digest,
-//!     setup.transcript.final_digest,
-//!     setup.burn.attestation_digest,
+//! // 3. Sign the claim. Both random inputs come from the OS in production.
+//! let publisher = PublisherKeypair::generate(&[0x11; 32])?;
+//! let payload = RegistrationPayload::new(
+//!     "acme-labs/tiny-model",
+//!     "1.0.0",
+//!     commitment.clone(),
+//!     1_760_000_000,
 //! );
-//! let signed = commitment.sign(&[0x11; 32], &[0x22; 32])?;
-//! signed.verify()?;
+//! let attestation = publisher.sign(&payload, &[0x22; 32])?;
 //!
-//! let proof = prove_inference(
-//!     &setup.proving_key,
-//!     field_from_u64(7),
-//!     field_from_u64(3),
-//!     field_from_u64(11),
-//!     [42u8; 32],
+//! // 4. Append it to the registry.
+//! let mut registry = ModelRegistry::open(&ledger)?;
+//! let record = registry.register_model(
+//!     ModelMetadata::new("acme-labs/tiny-model", "1.0.0", 1_760_000_000),
+//!     commitment,
+//!     attestation.signature,
+//!     publisher.public_key(),
 //! )?;
 //!
-//! let report = verify_inference(
-//!     &setup.verifying_key,
-//!     &signed.commitment.vk_digest,
-//!     &proof.public_inputs,
-//!     &proof.proof,
-//! )?;
-//! assert!(report.accepted());
-//!
-//! let _ = InferenceCircuit::blueprint();
-//! # Ok::<(), tvc_core::error::TvcError>(())
+//! // 5. Verify: the signature is the publisher's, and the weights are the ones signed for.
+//! registry.verify_model_registration_by("acme-labs/tiny-model", &publisher.public_key())?;
+//! registry.verify_weights("acme-labs/tiny-model", "1.0.0", &weights)?;
+//! registry.verify_chain()?;
+//! assert_eq!(registry.head(), record.digest);
+//! # std::fs::remove_dir_all(&scratch)?;
+//! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
-#![doc(html_root_url = "https://docs.rs/tvc-core/0.1.0")]
+#![doc(html_root_url = "https://docs.rs/tvc-core/0.2.0")]
 
-pub mod circuit;
-pub mod crypto_burn;
+pub mod commitment;
 pub mod digest;
 pub mod error;
 pub mod hex;
-pub mod mpc_setup;
-pub mod proof_verifier;
+pub mod registry;
+pub mod signer;
 
-pub use circuit::{InferenceCircuit, PUBLIC_INPUT_ARITY};
-pub use crypto_burn::{BurnAttestation, ToxicWaste};
-pub use error::{Result, TvcError};
-pub use mpc_setup::{
-    derive_vk_digest, field_from_u64, run_ceremony, CeremonyOutput, CeremonyTranscript,
-    ContributionRecord, ModelDescriptor, ParticipantContribution, SCHEME_TAG,
+pub use commitment::{
+    commit_weights, open_weight, verify_weight_opening, Dtype, FieldElement, MerkleCommitment,
+    MerkleOpening, MerkleProver, MerkleVectorCommitment, NoParams, Quantizer, Tensor, TensorSpec,
+    VectorCommitment, WeightCommitment, WeightVector, MERKLE_SCHEME_TAG,
 };
-pub use proof_verifier::{
-    prove_inference, verify_inference, InferenceProof, ParameterCommitment, SignedCommitment,
-    VerificationReport,
+pub use error::{Result, TvcError};
+pub use registry::{ModelMetadata, ModelRecord, ModelRegistry, FORMAT_VERSION, GENESIS_DIGEST};
+pub use signer::{
+    unix_now, validate_model_id, validate_version, PublisherKeypair, RegistrationPayload,
+    SignedRegistration,
 };
 
 /// Semantic version of the protocol this crate implements.
-pub const PROTOCOL_VERSION: &str = "w-tvc/1";
-
-/// Nostr event kind carrying a signed parameter commitment.
-///
-/// Chosen from the addressable range (`30000`–`39999`) defined by NIP-01, so a
-/// commitment is addressed by `(kind, pubkey, d)` and a wallet can always resolve
-/// the current commitment for a model version without scanning history.
-pub const NOSTR_COMMITMENT_KIND: u16 = 30200;
+pub const PROTOCOL_VERSION: &str = "w-tvc-registry/1";

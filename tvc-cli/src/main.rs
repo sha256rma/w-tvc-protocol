@@ -1,45 +1,43 @@
-//! `tvc` — operator and auditor command line for the W-TVC Protocol.
+//! `tvc` — publisher and auditor command line for the W-TVC model registry.
 //!
-//! Five subcommands cover the protocol's full lifecycle:
+//! # Where randomness and secrets enter
 //!
-//! | Command | Phase | Purpose |
-//! |---|---|---|
-//! | `ceremony` | Genesis | Run the setup, freeze the digest, burn the entropy. |
-//! | `commit` | Genesis | Sign the commitment and emit a Nostr-ready payload. |
-//! | `prove` | Runtime | Produce an inference proof against the proving key. |
-//! | `verify` | Runtime | Check a proof against a committed digest. |
-//! | `audit` | Anytime | Re-derive the digest and re-check a transcript. |
-//! | `demo` | — | Run the whole lifecycle end to end, including a forged attempt. |
+//! `tvc-core` has no entropy source and no environment access by design. This
+//! binary is the one place both appear, so the trust boundary is a file you can
+//! read rather than a library default you have to take on faith:
 //!
-//! Secrets never appear in argv. Signing keys are read from the `TVC_SECRET_KEY`
-//! environment variable, because process arguments are world-readable through
-//! `/proc` and land in shell history.
+//! - Randomness comes from the operating system via `getrandom`, for key
+//!   generation and for BIP-340 auxiliary randomness.
+//! - The publisher's signing key is read from `TVC_SECRET_KEY`, never from a
+//!   flag. Command-line arguments are visible in `ps` output and land in shell
+//!   history; an environment variable is merely bad rather than broadcast.
+//!
+//! # Exit codes
+//!
+//! `0` on success, `1` on failure. Every verification failure is a non-zero exit
+//! with a message naming what failed, so this is usable in a build gate.
 
-mod json;
-
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use ark_bn254::Fr;
 use clap::{Parser, Subcommand};
-use json::Json;
-use tvc_core::error::TvcError;
-use tvc_core::hex;
-use tvc_core::{
-    derive_vk_digest, field_from_u64, prove_inference, run_ceremony, verify_inference,
-    CeremonyOutput, InferenceProof, ModelDescriptor, ParameterCommitment, ParticipantContribution,
-    SignedCommitment, NOSTR_COMMITMENT_KIND, PROTOCOL_VERSION, SCHEME_TAG,
+use tvc_core::commitment::{
+    commit_weights, open_weight, verify_weight_opening, Quantizer, Tensor, WeightCommitment,
+    WeightVector,
 };
+use tvc_core::error::TvcError;
+use tvc_core::registry::{ModelRegistry, GENESIS_DIGEST};
+use tvc_core::signer::{unix_now, PublisherKeypair, RegistrationPayload};
+use tvc_core::{hex, PROTOCOL_VERSION};
 
+/// Environment variable holding the publisher's 32-byte signing key, as hex.
 const SECRET_KEY_VAR: &str = "TVC_SECRET_KEY";
 
 #[derive(Parser)]
 #[command(
     name = "tvc",
-    version,
-    about = "Weight Threshold Verification Ceremony — freeze a model, prove an inference, verify without trust.",
-    long_about = None
+    about = "Weight commitments, publisher attestations, and the public model registry.",
+    version
 )]
 struct Cli {
     #[command(subcommand)]
@@ -48,64 +46,72 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Run a Genesis Setup Ceremony and write its artefacts.
-    Ceremony {
-        /// Stable model identifier, for example `acme-llm-7b`.
+    /// Generate a publisher keypair from operating-system randomness.
+    Keygen,
+
+    /// Compute the weight commitment C for a model file, without registering it.
+    Commit {
+        /// Path to a `.safetensors` file.
+        #[arg(long)]
+        weights: PathBuf,
+        /// Fixed-point fractional bits used when quantising.
+        #[arg(long, default_value_t = Quantizer::DEFAULT_FRACTIONAL_BITS)]
+        fractional_bits: u32,
+    },
+
+    /// Commit to a model's weights, sign the claim, and append it to the registry.
+    Register {
+        /// Path to a `.safetensors` file.
+        #[arg(long)]
+        weights: PathBuf,
+        /// Stable model identifier, for example `meta-llama/Llama-3.2-1B`.
         #[arg(long)]
         model_id: String,
-        /// Frozen version string, for example `2026.09`.
+        /// Version string for this release, for example `1.0.0`.
         #[arg(long)]
         version: String,
-        /// Human-readable architecture summary recorded in the transcript.
-        #[arg(long, default_value = "affine-committed-inference")]
-        architecture: String,
-        /// Declared parameter count.
-        #[arg(long, default_value_t = 7_000_000_000)]
-        parameters: u64,
-        /// Participant identifier; repeat once per contributor.
-        #[arg(long = "participant", required = true)]
-        participants: Vec<String>,
-        /// Directory to write ceremony artefacts into.
-        #[arg(long, default_value = "ceremony-out")]
-        out: PathBuf,
+        /// Path to the registry ledger.
+        #[arg(long, default_value = "registry.jsonl")]
+        registry: PathBuf,
+        /// Fixed-point fractional bits used when quantising.
+        #[arg(long, default_value_t = Quantizer::DEFAULT_FRACTIONAL_BITS)]
+        fractional_bits: u32,
     },
-    /// Sign a ceremony's commitment and emit a Nostr-ready payload.
-    Commit {
-        /// Directory holding ceremony artefacts.
-        #[arg(long, default_value = "ceremony-out")]
-        setup: PathBuf,
+
+    /// Print the latest registration for a model.
+    Get {
+        /// Stable model identifier.
+        #[arg(long)]
+        model_id: String,
+        /// Path to the registry ledger.
+        #[arg(long, default_value = "registry.jsonl")]
+        registry: PathBuf,
     },
-    /// Produce an inference proof.
-    Prove {
-        /// Directory holding ceremony artefacts.
-        #[arg(long, default_value = "ceremony-out")]
-        setup: PathBuf,
-        /// Private weight parameter.
-        #[arg(long)]
-        weight: u64,
-        /// Private bias parameter.
-        #[arg(long)]
-        bias: u64,
-        /// Public input activation.
-        #[arg(long)]
-        input: u64,
-    },
-    /// Verify an inference proof against a committed digest.
+
+    /// Verify a registration's signature, and optionally the weights behind it.
     Verify {
-        /// Directory holding ceremony and proof artefacts.
-        #[arg(long, default_value = "ceremony-out")]
-        setup: PathBuf,
-        /// Committed verification digest, as fetched from a Nostr relay.
+        /// Stable model identifier.
         #[arg(long)]
-        digest: String,
+        model_id: String,
+        /// Path to the registry ledger.
+        #[arg(long, default_value = "registry.jsonl")]
+        registry: PathBuf,
+        /// Publisher x-only public key to pin, as 64 hex characters.
+        #[arg(long)]
+        publisher: Option<String>,
+        /// Recompute C from this `.safetensors` file and compare it.
+        #[arg(long)]
+        weights: Option<PathBuf>,
     },
-    /// Re-derive the digest and re-check the transcript hash chain.
+
+    /// Re-derive every digest in the ledger and report its head.
     Audit {
-        /// Directory holding ceremony artefacts.
-        #[arg(long, default_value = "ceremony-out")]
-        setup: PathBuf,
+        /// Path to the registry ledger.
+        #[arg(long, default_value = "registry.jsonl")]
+        registry: PathBuf,
     },
-    /// Run the full lifecycle end to end, including a rejected forgery.
+
+    /// Run the full setup flow end to end, including a rejected substitution.
     Demo {
         /// Directory to write demo artefacts into.
         #[arg(long, default_value = "demo-out")]
@@ -114,36 +120,32 @@ enum Command {
 }
 
 fn main() -> ExitCode {
-    match Cli::parse().command {
-        Command::Ceremony {
+    let cli = Cli::parse();
+
+    let outcome = match cli.command {
+        Command::Keygen => keygen(),
+        Command::Commit {
+            weights,
+            fractional_bits,
+        } => commit(&weights, fractional_bits),
+        Command::Register {
+            weights,
             model_id,
             version,
-            architecture,
-            parameters,
-            participants,
-            out,
-        } => report(ceremony(
-            &model_id,
-            &version,
-            &architecture,
-            parameters,
-            &participants,
-            &out,
-        )),
-        Command::Commit { setup } => report(commit(&setup)),
-        Command::Prove {
-            setup,
-            weight,
-            bias,
-            input,
-        } => report(prove(&setup, weight, bias, input)),
-        Command::Verify { setup, digest } => report(verify(&setup, &digest)),
-        Command::Audit { setup } => report(audit(&setup)),
-        Command::Demo { out } => report(demo(&out)),
-    }
-}
+            registry,
+            fractional_bits,
+        } => register(&weights, &model_id, &version, &registry, fractional_bits),
+        Command::Get { model_id, registry } => get(&model_id, &registry),
+        Command::Verify {
+            model_id,
+            registry,
+            publisher,
+            weights,
+        } => verify(&model_id, &registry, publisher.as_deref(), weights.as_deref()),
+        Command::Audit { registry } => audit(&registry),
+        Command::Demo { out } => demo(&out),
+    };
 
-fn report(outcome: Result<(), String>) -> ExitCode {
     match outcome {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
@@ -153,419 +155,327 @@ fn report(outcome: Result<(), String>) -> ExitCode {
     }
 }
 
-fn ceremony(
+/// Fills a buffer from the operating system's randomness source.
+fn os_random() -> Result<[u8; 32], String> {
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes)
+        .map_err(|error| format!("could not read operating-system randomness: {error}"))?;
+    Ok(bytes)
+}
+
+/// Loads the publisher's signing key from the environment.
+fn publisher_key() -> Result<PublisherKeypair, String> {
+    let raw = std::env::var(SECRET_KEY_VAR).map_err(|_| {
+        format!("{SECRET_KEY_VAR} is not set; run `tvc keygen` and export the secret key")
+    })?;
+    let bytes = hex::decode_array::<32>(raw.trim())
+        .map_err(|error| format!("{SECRET_KEY_VAR} must be 64 lowercase hex characters: {error}"))?;
+    PublisherKeypair::from_secret_bytes(&bytes).map_err(describe)
+}
+
+fn load_weights(path: &Path, fractional_bits: u32) -> Result<WeightVector, String> {
+    let quantizer = Quantizer::new(fractional_bits).map_err(describe)?;
+    WeightVector::from_safetensors_file(path, quantizer)
+        .map_err(|error| format!("{}: {}", path.display(), describe(error)))
+}
+
+fn print_commitment(commitment: &WeightCommitment, weights: &WeightVector) {
+    println!("  scheme             {}", commitment.scheme);
+    println!("  tensors            {}", weights.manifest().len());
+    println!("  elements           {}", commitment.length);
+    println!("  fractional bits    {}", commitment.fractional_bits);
+    println!("  manifest digest    {}", hex::encode(&commitment.manifest_digest));
+    println!(
+        "  scheme commitment  {}",
+        hex::encode(&commitment.scheme_commitment)
+    );
+    println!("  commitment C       {}", commitment.root_hex());
+}
+
+fn keygen() -> Result<(), String> {
+    let keypair = PublisherKeypair::generate(&os_random()?).map_err(describe)?;
+
+    println!("Publisher keypair generated.");
+    println!();
+    println!("  public key   {}", keypair.public_key_hex());
+    println!("  secret key   {}", keypair.expose_secret_hex().as_str());
+    println!();
+    println!("The public key is the publisher's entire identity; publish it freely.");
+    println!("The secret key was printed once and is not stored. Put it somewhere safe:");
+    println!();
+    println!("  export {SECRET_KEY_VAR}={}", keypair.expose_secret_hex().as_str());
+    println!();
+    println!("Anyone holding it can sign registrations for any model under this identity.");
+    Ok(())
+}
+
+fn commit(weights_path: &Path, fractional_bits: u32) -> Result<(), String> {
+    let weights = load_weights(weights_path, fractional_bits)?;
+    let commitment = commit_weights(&weights).map_err(describe)?;
+
+    println!("Weight commitment for {}:", weights_path.display());
+    print_commitment(&commitment, &weights);
+    Ok(())
+}
+
+fn register(
+    weights_path: &Path,
     model_id: &str,
     version: &str,
-    architecture: &str,
-    parameters: u64,
-    participants: &[String],
-    out: &Path,
+    ledger: &Path,
+    fractional_bits: u32,
 ) -> Result<(), String> {
-    let model = ModelDescriptor::new(model_id, version, architecture, parameters);
-    model.validate().map_err(describe)?;
+    let keypair = publisher_key()?;
+    let weights = load_weights(weights_path, fractional_bits)?;
+    let commitment = commit_weights(&weights).map_err(describe)?;
 
-    let mut contributions = Vec::with_capacity(participants.len());
-    for participant in participants {
-        contributions.push(ParticipantContribution::new(participant, os_entropy()?));
-    }
+    let payload =
+        RegistrationPayload::new(model_id, version, commitment.clone(), unix_now());
+    let attestation = keypair.sign(&payload, &os_random()?).map_err(describe)?;
 
-    println!("Genesis Setup Ceremony");
-    println!("  model      {}", model.address());
-    println!("  arch       {architecture}");
-    println!("  parties    {}", participants.len());
+    let mut registry = ModelRegistry::open(ledger).map_err(describe)?;
+    let record = registry.register_signed(attestation).map_err(describe)?;
 
-    let output = run_ceremony(model, contributions).map_err(describe)?;
-    write_ceremony(out, &output)?;
-
+    println!("Registered {} in {}.", record.address(), ledger.display());
     println!();
-    println!("  vk digest        {}", output.vk_digest_hex());
-    println!("  transcript       {}", output.transcript_digest_hex());
-    println!("  burn attestation {}", output.burn.attestation_hex());
-    println!("  entropy burned   {} bytes across {} contributions", output.burn.burned_bytes, output.burn.contributions);
-    println!();
-    println!("  artefacts written to {}", out.display());
-    println!("  next: tvc commit --setup {}", out.display());
+    print_commitment(&commitment, &weights);
+    println!("  publisher          {}", record.registration.publisher_hex());
+    println!("  timestamp          {}", payload.timestamp);
+    println!("  sequence           {}", record.sequence);
+    println!("  record digest      {}", record.digest_hex());
+    println!("  ledger head        {}", registry.head_hex());
     Ok(())
 }
 
-fn commit(setup: &Path) -> Result<(), String> {
-    let descriptor = read_descriptor(setup)?;
-    verify_model_binding(setup, &descriptor)?;
-    let vk_digest = read_digest(&setup.join("vk_digest.hex"))?;
-    let transcript_digest = read_digest(&setup.join("transcript_digest.hex"))?;
-    let burn_digest = read_digest(&setup.join("burn_digest.hex"))?;
-
-    let secret_key = read_secret_key()?;
-    let commitment = ParameterCommitment::new(
-        descriptor.model_id.clone(),
-        descriptor.version.clone(),
-        vk_digest,
-        transcript_digest,
-        burn_digest,
+fn get(model_id: &str, ledger: &Path) -> Result<(), String> {
+    let registry = ModelRegistry::open(ledger).map_err(describe)?;
+    let record = registry.get_model_commitment(model_id).map_err(describe)?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&record.to_json()).map_err(|error| error.to_string())?
     );
-    let signed = commitment
-        .sign(&secret_key, &os_entropy()?)
-        .map_err(describe)?;
-    signed.verify().map_err(describe)?;
-
-    let path = write_commitment(setup, &signed)?;
-
-    println!("Signed parameter commitment");
-    println!("  address    {}", signed.commitment.address());
-    println!("  vk digest  {}", signed.commitment.vk_digest_hex());
-    println!("  signer     {}", signed.signer_hex());
-    println!("  signature  verified locally before writing");
-    println!();
-    println!("  payload written to {}", path.display());
-    let hint = fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
-    println!("  next: cd nostr-bridge && npm run broadcast -- --commitment {}", hint.display());
     Ok(())
 }
 
-fn prove(setup: &Path, weight: u64, bias: u64, input: u64) -> Result<(), String> {
-    let proving_key = read_bytes(&setup.join("proving_key.bin"))?;
-    let proof = prove_inference(
-        &proving_key,
-        field_from_u64(weight),
-        field_from_u64(bias),
-        field_from_u64(input),
-        os_entropy()?,
-    )
-    .map_err(describe)?;
+fn verify(
+    model_id: &str,
+    ledger: &Path,
+    publisher: Option<&str>,
+    weights_path: Option<&Path>,
+) -> Result<(), String> {
+    let registry = ModelRegistry::open(ledger).map_err(describe)?;
 
-    write_proof(setup, &proof)?;
-
-    println!("Inference proof generated");
-    println!("  witness    weight and bias held privately, never serialised");
-    println!("  proof      {} bytes", proof.proof.len());
-    println!("  artefacts  {}", setup.join("proof.bin").display());
-    Ok(())
-}
-
-fn verify(setup: &Path, digest: &str) -> Result<(), String> {
-    let verifying_key = read_bytes(&setup.join("verifying_key.bin"))?;
-    let proof = read_bytes(&setup.join("proof.bin"))?;
-    let public_inputs = read_public_inputs(&setup.join("public_inputs.txt"))?;
-    let committed: [u8; 32] = hex::decode_array(digest.trim()).map_err(describe)?;
-
-    match verify_inference(&verifying_key, &committed, &public_inputs, &proof) {
-        Ok(report) => {
-            println!("ACCEPTED");
-            println!("  commitment  runtime key matches the digest published to Nostr");
-            println!("  proof       groth16 pairing check passed");
-            println!("  vk digest   {}", hex::encode(&report.observed_vk_digest));
-            Ok(())
+    let record = match publisher {
+        Some(text) => {
+            let pinned = hex::decode_array::<32>(text.trim()).map_err(|error| {
+                format!("--publisher must be 64 lowercase hex characters: {}", describe(error))
+            })?;
+            registry
+                .verify_model_registration_by(model_id, &pinned)
+                .map_err(describe)?
         }
-        Err(TvcError::CommitmentMismatch { expected, observed }) => Err(format!(
-            "REJECTED — model substitution detected\n  committed digest {expected}\n  runtime digest   {observed}\n  the proof may be internally valid, but it was produced against a different circuit"
-        )),
-        Err(TvcError::ProofRejected) => Err(
-            "REJECTED — the verifying key was correct and the pairing check still failed".to_owned(),
-        ),
-        Err(other) => Err(describe(other)),
+        None => registry
+            .verify_model_registration_detailed(model_id)
+            .map_err(describe)?,
+    };
+
+    println!("Signature verified for {}.", record.address());
+    println!("  publisher          {}", record.registration.publisher_hex());
+    println!("  commitment C       {}", record.weight_commitment().root_hex());
+    println!("  record digest      {}", record.digest_hex());
+
+    if publisher.is_none() {
+        println!();
+        println!("note: no --publisher pinned. This proves somebody signed this claim,");
+        println!("      not that the signer is a publisher you trust.");
     }
+
+    if let Some(path) = weights_path {
+        let commitment = record.weight_commitment();
+        let weights = load_weights(path, commitment.fractional_bits)?;
+        registry
+            .verify_weights(model_id, record.version(), &weights)
+            .map_err(describe)?;
+        println!();
+        println!("Weights at {} match the registered commitment.", path.display());
+    }
+
+    Ok(())
 }
 
-fn audit(setup: &Path) -> Result<(), String> {
-    let verifying_key = read_bytes(&setup.join("verifying_key.bin"))?;
-    let recorded = read_digest(&setup.join("vk_digest.hex"))?;
-    let recomputed = derive_vk_digest(&verifying_key);
+fn audit(ledger: &Path) -> Result<(), String> {
+    let registry = ModelRegistry::open(ledger).map_err(describe)?;
+    registry.verify_chain().map_err(describe)?;
 
-    println!("Audit");
-    println!("  recorded    {}", hex::encode(&recorded));
-    println!("  recomputed  {}", hex::encode(&recomputed));
-
-    if recorded != recomputed {
-        return Err("digest on disk does not match the verifying key beside it".to_owned());
+    println!("Ledger {} is intact.", ledger.display());
+    println!("  records            {}", registry.len());
+    println!("  head               {}", registry.head_hex());
+    if registry.head() == GENESIS_DIGEST {
+        println!("  (empty ledger; head is the genesis digest)");
     }
-    println!("  result      digest reproduces from the verifying key");
+    println!();
+    for record in registry.records() {
+        println!(
+            "  [{}] {:<44} C={} by {}",
+            record.sequence,
+            record.address(),
+            &record.weight_commitment().root_hex()[..16],
+            &record.registration.publisher_hex()[..16]
+        );
+    }
     Ok(())
+}
+
+/// Writes a deterministic safetensors file, standing in for a downloaded model.
+///
+/// Deterministic so the demo's digests are reproducible and can be compared
+/// across machines; the generator is a plain LCG, which is emphatically not a
+/// source of cryptographic randomness and is used only to produce plausible
+/// weights.
+fn write_demo_model(path: &Path, seed: u64, tweak: Option<(usize, f32)>) -> Result<(), String> {
+    let mut state = seed;
+    let mut next = || {
+        state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+        ((state >> 33) as f32 / (1u64 << 31) as f32) - 1.0
+    };
+
+    let mut attention: Vec<f32> = (0..64).map(|_| next()).collect();
+    let mut projection: Vec<f32> = (0..32).map(|_| next()).collect();
+    if let Some((index, value)) = tweak {
+        if index < attention.len() {
+            attention[index] = value;
+        } else {
+            projection[index - attention.len()] = value;
+        }
+    }
+
+    let tensors = vec![
+        Tensor::from_f32("model.layers.0.attention.weight", vec![8, 8], &attention)
+            .map_err(describe)?,
+        Tensor::from_f32("model.layers.0.projection.weight", vec![4, 8], &projection)
+            .map_err(describe)?,
+    ];
+
+    // Assemble the safetensors container: 8-byte little-endian header length,
+    // the JSON header, then the concatenated little-endian tensor data.
+    let mut header = serde_json::Map::new();
+    let mut body = Vec::new();
+    for tensor in &tensors {
+        let start = body.len();
+        body.extend_from_slice(&tensor.data);
+        header.insert(
+            tensor.name.clone(),
+            serde_json::json!({
+                "dtype": tensor.dtype.as_str(),
+                "shape": tensor.shape,
+                "data_offsets": [start, body.len()],
+            }),
+        );
+    }
+    let header = serde_json::to_vec(&serde_json::Value::Object(header))
+        .map_err(|error| error.to_string())?;
+
+    let mut file = (header.len() as u64).to_le_bytes().to_vec();
+    file.extend_from_slice(&header);
+    file.extend_from_slice(&body);
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    std::fs::write(path, file).map_err(|error| format!("{}: {error}", path.display()))
 }
 
 fn demo(out: &Path) -> Result<(), String> {
-    let honest_dir = out.join("honest");
-    let rogue_dir = out.join("rogue");
+    const MODEL_ID: &str = "acme-labs/demo-llm";
+    const VERSION: &str = "1.0.0";
 
-    println!("== Phase 1: Genesis Setup Ceremony ==");
-    let honest = run_ceremony(
-        ModelDescriptor::new("acme-llm-7b", "2026.09", "affine-committed-inference", 7_000_000_000),
-        vec![
-            ParticipantContribution::new("bitshala", os_entropy()?),
-            ParticipantContribution::new("acme-labs", os_entropy()?),
-            ParticipantContribution::new("independent-auditor", os_entropy()?),
-        ],
-    )
-    .map_err(describe)?;
-    write_ceremony(&honest_dir, &honest)?;
+    let ledger = out.join("registry.jsonl");
+    let honest_path = out.join("honest.safetensors");
+    let substituted_path = out.join("substituted.safetensors");
+    let _ = std::fs::remove_file(&ledger);
 
-    println!("  committed digest  {}", honest.vk_digest_hex());
-    println!("  transcript chain  {}", if honest.transcript.verify_chain() { "verified" } else { "BROKEN" });
-    println!("  entropy burned    {} bytes", honest.burn.burned_bytes);
-
-    let demo_key = os_entropy()?;
-    let signed = ParameterCommitment::new(
-        "acme-llm-7b",
-        "2026.09",
-        honest.vk_digest,
-        honest.transcript.final_digest,
-        honest.burn.attestation_digest,
-    )
-    .sign(&demo_key, &os_entropy()?)
-    .map_err(describe)?;
-    signed.verify().map_err(describe)?;
-    let commitment_path = write_commitment(&honest_dir, &signed)?;
-    println!("  signed by         {} (ephemeral demo key)", signed.signer_hex());
-
+    println!("W-TVC setup demo — {PROTOCOL_VERSION}");
+    println!("Artefacts in {}", out.display());
     println!();
-    println!("== Phase 2: honest runtime inference ==");
-    let honest_proof = prove_inference(
-        &honest.proving_key,
-        field_from_u64(7),
-        field_from_u64(3),
-        field_from_u64(11),
-        os_entropy()?,
-    )
-    .map_err(describe)?;
-    let accepted = verify_inference(
-        &honest.verifying_key,
-        &honest.vk_digest,
-        &honest_proof.public_inputs,
-        &honest_proof.proof,
-    )
-    .map_err(describe)?;
-    println!("  wallet verdict    {}", if accepted.accepted() { "ACCEPTED" } else { "rejected" });
 
+    println!("1. Simulate a published model.");
+    write_demo_model(&honest_path, 0x5eed, None)?;
+    let weights = load_weights(&honest_path, Quantizer::DEFAULT_FRACTIONAL_BITS)?;
+    println!("   {} — {} tensors, {} weights", honest_path.display(), weights.manifest().len(), weights.len());
     println!();
-    println!("== Phase 2 under attack: silent model downgrade ==");
-    let rogue = run_ceremony(
-        ModelDescriptor::new("acme-llm-7b", "2026.09", "affine-committed-inference", 1_500_000_000),
-        vec![ParticipantContribution::new("rogue-operator", os_entropy()?)],
-    )
-    .map_err(describe)?;
-    write_ceremony(&rogue_dir, &rogue)?;
 
-    let rogue_proof = prove_inference(
-        &rogue.proving_key,
-        field_from_u64(7),
-        field_from_u64(3),
-        field_from_u64(11),
-        os_entropy()?,
-    )
-    .map_err(describe)?;
+    println!("2. Commit to its weights.");
+    let commitment = commit_weights(&weights).map_err(describe)?;
+    print_commitment(&commitment, &weights);
+    println!();
 
-    let self_consistent = verify_inference(
-        &rogue.verifying_key,
-        &rogue.vk_digest,
-        &rogue_proof.public_inputs,
-        &rogue_proof.proof,
-    )
-    .map_err(describe)?;
-    println!("  rogue proof is internally valid against its own key: {}", self_consistent.accepted());
-
-    match verify_inference(
-        &rogue.verifying_key,
-        &honest.vk_digest,
-        &rogue_proof.public_inputs,
-        &rogue_proof.proof,
-    ) {
-        Err(TvcError::CommitmentMismatch { expected, observed }) => {
-            println!("  wallet verdict    REJECTED");
-            println!("    committed       {expected}");
-            println!("    runtime         {observed}");
-            println!();
-            println!("  A valid proof about the wrong model is still refused, because the");
-            println!("  commitment is checked before the proof. This is the downgrade defence.");
-            println!();
-            println!("== Next: publish the commitment to Nostr ==");
-            println!("  The demo signed with a throwaway key. Hand the same key to the bridge so");
-            println!("  the Nostr identity matches the commitment signer, then broadcast:");
-            println!();
-            println!("    export TVC_SECRET_KEY={}", hex::encode(&demo_key));
-            println!("    cd nostr-bridge && npm install");
-            println!("    npm run broadcast -- --commitment ../{}", commitment_path.display());
-            println!();
-            println!("  That is a demo key with no value. A real ceremony key never leaves");
-            println!("  the environment and is never printed.");
-            Ok(())
-        }
-        Err(other) => Err(format!("demo produced an unexpected failure: {}", describe(other))),
-        Ok(_) => Err("demo invariant broken: a substituted model was accepted".to_owned()),
-    }
-}
-
-fn write_ceremony(out: &Path, output: &CeremonyOutput) -> Result<(), String> {
-    fs::create_dir_all(out).map_err(|error| error.to_string())?;
-    write_file(&out.join("verifying_key.bin"), &output.verifying_key)?;
-    write_file(&out.join("proving_key.bin"), &output.proving_key)?;
-    write_text(&out.join("vk_digest.hex"), &output.vk_digest_hex())?;
-    write_text(&out.join("transcript_digest.hex"), &output.transcript_digest_hex())?;
-    write_text(&out.join("burn_digest.hex"), &output.burn.attestation_hex())?;
-    write_text(
-        &out.join("model_binding.hex"),
-        &hex::encode(&output.transcript.model.binding_digest()),
-    )?;
-    write_text(
-        &out.join("model.txt"),
-        &format!(
-            "{}\n{}\n{}\n{}",
-            output.transcript.model.model_id,
-            output.transcript.model.version,
-            output.transcript.model.architecture,
-            output.transcript.model.parameter_count
-        ),
-    )?;
-
-    let records = output
-        .transcript
-        .records
-        .iter()
-        .map(|record| {
-            Json::obj(vec![
-                ("index", Json::Num(u64::from(record.index))),
-                ("participant_id", Json::s(&record.participant_id)),
-                ("commitment", Json::s(hex::encode(&record.commitment))),
-                ("running_digest", Json::s(hex::encode(&record.running_digest))),
-            ])
-        })
-        .collect::<Vec<_>>();
-
-    let transcript = Json::obj(vec![
-        ("protocol", Json::s(PROTOCOL_VERSION)),
-        ("scheme", Json::s(SCHEME_TAG)),
-        ("model_id", Json::s(&output.transcript.model.model_id)),
-        ("version", Json::s(&output.transcript.model.version)),
-        ("architecture", Json::s(&output.transcript.model.architecture)),
-        ("parameter_count", Json::Num(output.transcript.model.parameter_count)),
-        ("vk_digest", Json::s(output.vk_digest_hex())),
-        ("final_digest", Json::s(output.transcript_digest_hex())),
-        ("chain_verified", Json::s(output.transcript.verify_chain().to_string())),
-        ("contributions", Json::Arr(records)),
-        (
-            "burn",
-            Json::obj(vec![
-                ("attestation_digest", Json::s(output.burn.attestation_hex())),
-                ("contributions", Json::Num(output.burn.contributions as u64)),
-                ("burned_bytes", Json::Num(output.burn.burned_bytes as u64)),
-            ]),
-        ),
-    ]);
-    write_text(&out.join("transcript.json"), &transcript.render(0))
-}
-
-fn write_commitment(setup: &Path, signed: &SignedCommitment) -> Result<PathBuf, String> {
-    let payload = Json::obj(vec![
-        ("protocol", Json::s(PROTOCOL_VERSION)),
-        ("kind", Json::Num(u64::from(NOSTR_COMMITMENT_KIND))),
-        ("address", Json::s(signed.commitment.address())),
-        ("model_id", Json::s(&signed.commitment.model_id)),
-        ("version", Json::s(&signed.commitment.version)),
-        ("scheme", Json::s(&signed.commitment.scheme)),
-        ("vk_digest", Json::s(hex::encode(&signed.commitment.vk_digest))),
-        ("transcript_digest", Json::s(hex::encode(&signed.commitment.transcript_digest))),
-        ("burn_digest", Json::s(hex::encode(&signed.commitment.burn_digest))),
-        ("signer", Json::s(signed.signer_hex())),
-        ("signature", Json::s(signed.signature_hex())),
-    ]);
-    let path = setup.join("commitment.json");
-    fs::write(&path, format!("{}\n", payload.render(0)))
-        .map_err(|error| format!("{}: {error}", path.display()))?;
-    Ok(path)
-}
-
-fn write_proof(setup: &Path, proof: &InferenceProof) -> Result<(), String> {
-    write_file(&setup.join("proof.bin"), &proof.proof)?;
-    let encoded = proof.public_inputs_hex().map_err(describe)?;
-    write_text(&setup.join("public_inputs.txt"), &encoded.join("\n"))
-}
-
-fn read_public_inputs(path: &Path) -> Result<Vec<Fr>, String> {
-    let text = fs::read_to_string(path)
-        .map_err(|error| format!("{}: {error}", path.display()))?;
-    let values: Vec<String> = text
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(str::to_owned)
-        .collect();
-    InferenceProof::public_inputs_from_hex(&values).map_err(describe)
-}
-
-fn read_descriptor(setup: &Path) -> Result<ModelDescriptor, String> {
-    let path = setup.join("model.txt");
-    let text = fs::read_to_string(&path).map_err(|error| format!("{}: {error}", path.display()))?;
-    let lines: Vec<&str> = text.lines().collect();
-    if lines.len() < 4 {
-        return Err(format!(
-            "{} is malformed: expected 4 lines, found {}",
-            path.display(),
-            lines.len()
-        ));
-    }
-    let parameter_count = lines[3]
-        .trim()
-        .parse::<u64>()
-        .map_err(|error| format!("{}: parameter count is not a number: {error}", path.display()))?;
-
-    let descriptor = ModelDescriptor::new(
-        lines[0].trim(),
-        lines[1].trim(),
-        lines[2].trim(),
-        parameter_count,
+    println!("3. Sign the registration with a publisher keypair.");
+    let keypair = PublisherKeypair::generate(&os_random()?).map_err(describe)?;
+    let payload = RegistrationPayload::new(MODEL_ID, VERSION, commitment.clone(), unix_now());
+    let attestation = keypair.sign(&payload, &os_random()?).map_err(describe)?;
+    println!("   publisher          {}", keypair.public_key_hex());
+    println!(
+        "   sighash            {}",
+        hex::encode(&payload.sighash(&keypair.public_key()))
     );
-    descriptor.validate().map_err(describe)?;
-    Ok(descriptor)
-}
+    println!("   signature          {}", attestation.signature_hex());
+    println!();
 
-fn verify_model_binding(setup: &Path, descriptor: &ModelDescriptor) -> Result<(), String> {
-    let path = setup.join("model_binding.hex");
-    let recorded = read_digest(&path).map_err(|error| {
-        format!("{error}\n  This ceremony predates model-binding checks. Re-run `tvc ceremony`.")
-    })?;
-    let recomputed = descriptor.binding_digest();
-    if recorded != recomputed {
-        return Err(describe(TvcError::ModelBindingMismatch {
-            expected: hex::encode(&recorded),
-            observed: hex::encode(&recomputed),
-        }));
+    println!("4. Append it to the public registry.");
+    let mut registry = ModelRegistry::open(&ledger).map_err(describe)?;
+    let record = registry.register_signed(attestation).map_err(describe)?;
+    println!("   {}", ledger.display());
+    println!("   sequence           {}", record.sequence);
+    println!("   record digest      {}", record.digest_hex());
+    println!("   ledger head        {}", registry.head_hex());
+    println!();
+
+    println!("5. Verify the entry as a consumer would.");
+    registry
+        .verify_model_registration_by(MODEL_ID, &keypair.public_key())
+        .map_err(describe)?;
+    println!("   signature verifies against the pinned publisher key");
+    registry
+        .verify_weights(MODEL_ID, VERSION, &weights)
+        .map_err(describe)?;
+    println!("   weights on disk recommit to the registered C");
+    registry.verify_chain().map_err(describe)?;
+    println!("   ledger hash chain is intact");
+
+    let opening = open_weight(&weights, 7).map_err(describe)?;
+    verify_weight_opening(&commitment, 7, &weights.elements()[7], &opening).map_err(describe)?;
+    println!(
+        "   opening for W[7] = {} verifies in {} steps",
+        weights.elements()[7].to_hex(),
+        opening.siblings.len()
+    );
+    println!();
+
+    println!("6. Substitute the model and confirm the registry catches it.");
+    // One weight changed out of 96 — the smallest possible downgrade.
+    write_demo_model(&substituted_path, 0x5eed, Some((7, 0.5)))?;
+    let substituted = load_weights(&substituted_path, Quantizer::DEFAULT_FRACTIONAL_BITS)?;
+
+    match registry.verify_weights(MODEL_ID, VERSION, &substituted) {
+        Err(TvcError::CommitmentMismatch { expected, observed }) => {
+            println!("   rejected, as it must be:");
+            println!("     registered C     {expected}");
+            println!("     substituted C    {observed}");
+        }
+        Err(other) => return Err(format!("demo produced an unexpected failure: {}", describe(other))),
+        Ok(_) => {
+            return Err("demo invariant broken: substituted weights were accepted".to_owned())
+        }
     }
+
+    println!();
+    println!("Done. Inspect the ledger with:");
+    println!("  tvc audit --registry {}", ledger.display());
+    println!("  tvc get --model-id {MODEL_ID} --registry {}", ledger.display());
     Ok(())
 }
 
-fn read_digest(path: &Path) -> Result<[u8; 32], String> {
-    let text = fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
-    hex::decode_array(text.trim()).map_err(describe)
-}
-
-fn read_bytes(path: &Path) -> Result<Vec<u8>, String> {
-    fs::read(path).map_err(|error| format!("{}: {error}", path.display()))
-}
-
-fn write_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    fs::write(path, bytes).map_err(|error| format!("{}: {error}", path.display()))
-}
-
-fn write_text(path: &Path, text: &str) -> Result<(), String> {
-    write_file(path, format!("{text}\n").as_bytes())
-}
-
-fn read_secret_key() -> Result<[u8; 32], String> {
-    let raw = std::env::var(SECRET_KEY_VAR).map_err(|_| {
-        format!(
-            "{SECRET_KEY_VAR} is not set.\n  Signing keys are read from the environment so they never appear in argv or shell history.\n  Generate one with:  export {SECRET_KEY_VAR}=$(openssl rand -hex 32)"
-        )
-    })?;
-    hex::decode_array(raw.trim()).map_err(|error| {
-        format!("{SECRET_KEY_VAR} must be 64 lowercase hex characters: {error}")
-    })
-}
-
-fn os_entropy() -> Result<[u8; 32], String> {
-    let mut buffer = [0u8; 32];
-    getrandom::fill(&mut buffer)
-        .map_err(|error| format!("operating system CSPRNG unavailable: {error}"))?;
-    Ok(buffer)
-}
-
+/// Renders a core error for the terminal.
 fn describe(error: TvcError) -> String {
     error.to_string()
 }

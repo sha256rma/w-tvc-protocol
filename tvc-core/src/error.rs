@@ -1,22 +1,25 @@
-//! Error taxonomy for the W-TVC protocol.
+//! Error taxonomy for the model identity layer.
 //!
 //! Every fallible boundary in this crate returns [`TvcError`]. The variants are
-//! deliberately coarse at the type level and precise in their payloads so that a
-//! verifying wallet can branch on *class* of failure (is this a malformed input
-//! or a cryptographic rejection?) without string matching.
+//! coarse at the type level and precise in their payloads, so a verifier can
+//! branch on *class* of failure — is this malformed input, or a cryptographic
+//! rejection? — without matching on strings.
 //!
-//! The distinction that matters operationally is between
-//! [`TvcError::CommitmentMismatch`] and [`TvcError::ProofRejected`]:
+//! Three distinctions are load-bearing and deliberately not collapsed:
 //!
-//! - `CommitmentMismatch` means the verifying key presented at runtime is not the
-//!   key that was frozen by the ceremony. This is the model-substitution alarm:
-//!   the proof may well be internally valid, but it was produced against a
-//!   different circuit than the one the consortium attested to.
-//! - `ProofRejected` means the verifying key was correct and the proof still
-//!   failed to satisfy the pairing check. This is an invalid-execution alarm.
+//! - [`TvcError::CommitmentMismatch`] means the weights presented do not hash to
+//!   the commitment the registry holds. This is the model-substitution alarm: the
+//!   signature may be perfectly valid, but it vouches for different weights.
+//! - [`TvcError::AttestationUnsigned`] means the commitment and metadata are
+//!   internally consistent but nobody with the claimed key signed them.
+//! - [`TvcError::SignerMismatch`] means a *valid* signature was produced by a key
+//!   other than the one the caller pinned. Folding this into
+//!   `AttestationUnsigned` would let any key vouch for any model, which is no
+//!   trust anchor at all.
 //!
-//! Conflating the two would let a downgrading provider hide a model swap behind a
-//! generic "verification failed", so they are kept structurally distinct.
+//! A publisher that swaps weights after registering should trip the first; a
+//! relay that republishes someone else's model under its own key should trip the
+//! third. Conflating them hides exactly the attacks this layer exists to catch.
 
 use core::fmt;
 
@@ -27,101 +30,164 @@ pub type Result<T> = core::result::Result<T, TvcError>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum TvcError {
-    /// A ceremony was requested with no contributing participants.
-    EmptyCeremony,
-    /// Two participants presented the same identifier, breaking transcript
-    /// auditability because contributions could no longer be attributed.
-    DuplicateParticipant(String),
-    /// The R1CS constraint system could not be synthesised.
-    Synthesis(String),
-    /// Canonical serialisation or deserialisation of an arkworks object failed.
-    Codec(String),
-    /// The runtime verifying key does not hash to the committed digest.
-    CommitmentMismatch {
-        /// Digest published by the ceremony and fetched from a Nostr relay.
-        expected: String,
-        /// Digest recomputed from the verifying key supplied at runtime.
-        observed: String,
-    },
-    /// The Groth16 pairing check rejected the proof under a matching key.
-    ProofRejected,
-    /// A witness assignment was requested from a circuit holding no witness.
-    MissingWitness,
-    /// A byte string was not valid lowercase hexadecimal of the expected length.
-    MalformedHex(String),
-    /// A secp256k1 key, signature, or message was structurally invalid.
-    Signature(String),
-    /// The BIP-340 signature over a parameter commitment did not verify.
-    CommitmentUnsigned,
-    /// A model identifier contained a character that is unsafe to transport.
+    /// A model identifier, version, or publisher name was unsafe to transport.
     InvalidIdentifier {
-        /// Which descriptor field was rejected.
+        /// Which field was rejected.
         field: &'static str,
         /// Why it was rejected.
         reason: String,
     },
-    /// Ceremony artefacts describe a different model than the one they froze.
-    ModelBindingMismatch {
-        /// Binding digest recorded by the ceremony.
+    /// A byte string was not valid lowercase hexadecimal of the expected length.
+    MalformedHex(String),
+    /// A secp256k1 key, signature, or message was structurally invalid.
+    Signature(String),
+    /// The BIP-340 signature over a registration payload did not verify.
+    AttestationUnsigned,
+    /// A valid signature was produced by a key other than the pinned one.
+    SignerMismatch {
+        /// x-only public key the caller pinned, lowercase hex.
         expected: String,
-        /// Binding digest recomputed from the descriptor read back from disk.
+        /// x-only public key that actually signed, lowercase hex.
         observed: String,
     },
+    /// Recomputed weight commitment differs from the committed one.
+    CommitmentMismatch {
+        /// Commitment recorded in the registry.
+        expected: String,
+        /// Commitment recomputed from the weights supplied.
+        observed: String,
+    },
+    /// A commitment was requested over a weight vector holding no elements.
+    EmptyWeights,
+    /// A tensor file could not be parsed into tensors.
+    MalformedTensorFile(String),
+    /// A tensor used an element type this crate does not quantise.
+    UnsupportedDtype(String),
+    /// A weight fell outside the range the chosen fixed-point scale can encode.
+    QuantizationOverflow {
+        /// Name of the tensor holding the offending element.
+        tensor: String,
+        /// The value that could not be represented, already rendered.
+        ///
+        /// Held as text rather than `f64` deliberately: NaN is one of the values
+        /// this variant reports, and `NaN != NaN` would make equality on the
+        /// error type quietly useless.
+        value: String,
+    },
+    /// An opening was requested for an index outside the committed vector.
+    IndexOutOfRange {
+        /// Index requested.
+        index: usize,
+        /// Number of elements actually committed.
+        length: usize,
+    },
+    /// A Merkle opening did not reproduce the committed root.
+    OpeningRejected,
+    /// A model version already holds a registration; the ledger is append-only.
+    DuplicateRegistration(String),
+    /// No registration exists for the requested model.
+    UnknownModel(String),
+    /// The ledger on disk is not a well-formed append-only record.
+    LedgerCorrupt {
+        /// One-based line number of the offending record, or 0 for whole-file faults.
+        line: usize,
+        /// What was wrong with it.
+        reason: String,
+    },
+    /// The ledger's hash chain does not reproduce its recorded head.
+    LedgerChainBroken {
+        /// One-based line number where the chain first diverges.
+        line: usize,
+        /// Digest the record claims to extend.
+        expected: String,
+        /// Digest actually produced by the records before it.
+        observed: String,
+    },
+    /// The ledger file grew since this handle read it, so its view is stale.
+    ///
+    /// Raised instead of appending, because an append computed against a stale
+    /// head would write a duplicate sequence number and fork the hash chain.
+    LedgerChangedUnderneath {
+        /// Byte length this handle last observed.
+        expected: u64,
+        /// Byte length found when the append was attempted.
+        observed: u64,
+    },
+    /// An underlying filesystem operation failed.
+    Io(String),
 }
 
 impl fmt::Display for TvcError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::EmptyCeremony => {
-                write!(f, "ceremony requires at least one participant contribution")
-            }
-            Self::DuplicateParticipant(id) => {
-                write!(f, "duplicate ceremony participant identifier: {id}")
-            }
-            Self::Synthesis(detail) => write!(f, "constraint synthesis failed: {detail}"),
-            Self::Codec(detail) => write!(f, "canonical codec failure: {detail}"),
-            Self::CommitmentMismatch { expected, observed } => write!(
-                f,
-                "parameter commitment mismatch: committed vk digest {expected}, runtime vk digest {observed}"
-            ),
-            Self::ProofRejected => {
-                write!(f, "groth16 pairing check rejected the inference proof")
-            }
-            Self::MissingWitness => {
-                write!(f, "circuit holds no witness assignment")
+            Self::InvalidIdentifier { field, reason } => {
+                write!(f, "invalid {field}: {reason}")
             }
             Self::MalformedHex(detail) => write!(f, "malformed hex encoding: {detail}"),
             Self::Signature(detail) => write!(f, "secp256k1 failure: {detail}"),
-            Self::CommitmentUnsigned => {
-                write!(f, "BIP-340 signature over parameter commitment did not verify")
-            }
-            Self::InvalidIdentifier { field, reason } => {
-                write!(f, "invalid model {field}: {reason}")
-            }
-            Self::ModelBindingMismatch { expected, observed } => write!(
+            Self::AttestationUnsigned => write!(
                 f,
-                "model binding mismatch: ceremony froze {expected}, descriptor on disk yields {observed}"
+                "BIP-340 signature over the registration payload did not verify"
             ),
+            Self::SignerMismatch { expected, observed } => write!(
+                f,
+                "signer mismatch: pinned publisher key {expected}, attestation signed by {observed}"
+            ),
+            Self::CommitmentMismatch { expected, observed } => write!(
+                f,
+                "weight commitment mismatch: registry holds {expected}, supplied weights commit to {observed}"
+            ),
+            Self::EmptyWeights => write!(f, "cannot commit to an empty weight vector"),
+            Self::MalformedTensorFile(detail) => write!(f, "malformed tensor file: {detail}"),
+            Self::UnsupportedDtype(dtype) => {
+                write!(f, "unsupported tensor element type: {dtype}")
+            }
+            Self::QuantizationOverflow { tensor, value } => write!(
+                f,
+                "weight {value} in tensor {tensor} exceeds the range of the chosen fixed-point scale"
+            ),
+            Self::IndexOutOfRange { index, length } => write!(
+                f,
+                "index {index} is outside the committed vector of {length} elements"
+            ),
+            Self::OpeningRejected => {
+                write!(f, "merkle opening did not reproduce the committed root")
+            }
+            Self::DuplicateRegistration(address) => write!(
+                f,
+                "{address} is already registered; the registry is append-only, publish a new version instead"
+            ),
+            Self::UnknownModel(model_id) => write!(f, "no registration found for {model_id}"),
+            Self::LedgerCorrupt { line, reason } => {
+                write!(f, "registry ledger corrupt at line {line}: {reason}")
+            }
+            Self::LedgerChainBroken {
+                line,
+                expected,
+                observed,
+            } => write!(
+                f,
+                "registry ledger hash chain broken at line {line}: record extends {expected}, but the preceding records produce {observed}"
+            ),
+            Self::LedgerChangedUnderneath { expected, observed } => write!(
+                f,
+                "another writer appended to the ledger: it was {expected} bytes when read, {observed} now; reopen the registry and retry"
+            ),
+            Self::Io(detail) => write!(f, "filesystem failure: {detail}"),
         }
     }
 }
 
 impl std::error::Error for TvcError {}
 
-impl From<ark_serialize::SerializationError> for TvcError {
-    fn from(value: ark_serialize::SerializationError) -> Self {
-        Self::Codec(value.to_string())
-    }
-}
-
-impl From<ark_relations::r1cs::SynthesisError> for TvcError {
-    fn from(value: ark_relations::r1cs::SynthesisError) -> Self {
-        Self::Synthesis(value.to_string())
-    }
-}
-
 impl From<secp256k1::Error> for TvcError {
     fn from(value: secp256k1::Error) -> Self {
         Self::Signature(value.to_string())
+    }
+}
+
+impl From<std::io::Error> for TvcError {
+    fn from(value: std::io::Error) -> Self {
+        Self::Io(value.to_string())
     }
 }
