@@ -28,6 +28,17 @@ authors = ["W-TVC Protocol Contributors"]
 #
 # Hex stays in-tree (`tvc_core::hex`): forty auditable lines, and every digest a
 # verifier acts on passes through it.
+#
+# tvc-cli additionally depends on:
+#
+#   ureq                        `tvc anchor` submits the ledger head to a public
+#                               OpenTimestamps calendar over HTTPS. This is the
+#                               one place in the workspace that needs an HTTP
+#                               client, so it is declared on tvc-cli directly
+#                               rather than shared here; blocking, not async,
+#                               to match how the rest of this workspace is
+#                               written, and built against rustls rather than
+#                               a system TLS library.
 [workspace.dependencies]
 bitcoin_hashes = { version = "1.2", default-features = false, features = ["std"] }
 secp256k1 = { version = "0.33", default-features = false, features = ["std"] }
