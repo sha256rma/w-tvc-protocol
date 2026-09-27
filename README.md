@@ -138,6 +138,30 @@ cargo run --bin tvc -- audit --registry registry.jsonl
 
 Every verification failure exits non-zero with a message naming what failed, so this works in a build gate.
 
+### Anchoring the ledger head
+
+`verify_chain` catches an edited, reordered, or deleted record. It cannot catch a *shorter* one: truncating the ledger yields a shorter but internally valid history, caught only by a consumer who already holds an earlier head — see [Threat model](#threat-model). An anchor is how that earlier head stops being something a human has to personally remember.
+
+```bash
+# Submit the current ledger head to the public OpenTimestamps calendar
+# network and store the result beside the ledger, as registry.head.ots.
+cargo run --bin tvc -- anchor --registry registry.jsonl
+
+# Read that proof back and report what it currently establishes. Offline:
+# no network call happens here.
+cargo run --bin tvc -- verify-anchor --registry registry.jsonl
+```
+
+`tvc verify-anchor` reports exactly one of three things, and no more:
+
+| What the proof shows | What that means |
+|---|---|
+| **Pending**, naming a calendar URI | A calendar has recorded the commitment. This is the calendar operator's word, nothing more — it becomes independently checkable once upgraded to a Bitcoin attestation. |
+| **Attested to Bitcoin block `N`** | The proof *claims* block `N` commits to this head. This build has not checked that claim against an actual block header — doing so needs an external Bitcoin data source, which is not implemented here (see [Roadmap](#roadmap)). Treat this as a lead to check against a block explorer, not a settled fact. |
+| A digest mismatch | The stored proof commits to a different head than the ledger currently has. `verify-anchor` exits non-zero rather than reporting a status for the wrong ledger. |
+
+`NullAnchor`, the implementation the test suite uses, calls no calendar at all and can only ever report that nothing was asked.
+
 ---
 
 ## Architecture
@@ -175,6 +199,7 @@ Every verification failure exits non-zero with a message naming what failed, so 
 | `tvc-core/src/hex.rs` | Strict lowercase hex codec used on every boundary. |
 | `tvc-core/src/error.rs` | The error taxonomy. |
 | `tvc-cli/src/main.rs` | The `tvc` command line; the only place randomness and secrets enter. |
+| `tvc-cli/src/anchor.rs` | Submits the ledger head to a public OpenTimestamps calendar over HTTPS, and reports what a stored proof establishes without any further network call. |
 
 ### Why the commitment is split into two layers
 
@@ -258,7 +283,7 @@ Honesty about scope is load-bearing for a protocol that asks to be trusted.
 - **Weight quality.** `C` says which weights, not whether they are any good.
 - **That a served inference used the committed weights.** This is the closed-weights gap and it is not closed here. `proof_commitment` is the hook for it; the circuit that would use it does not exist in this tree.
 - **Timestamps.** The registry has no way to check a publisher's clock and does not pretend to. The timestamp is part of what was signed, so it is exactly as trustworthy as the key that signed it.
-- **Rollback.** Truncating the ledger yields a shorter but internally valid history. This is caught by holding an earlier head, not by the chain itself — there is a test pinning that limitation in place.
+- **Rollback.** Truncating the ledger yields a shorter but internally valid history. This is caught by holding an earlier head, not by the chain itself — there is a test pinning that limitation in place. `tvc anchor` (see [Anchoring the ledger head](#anchoring-the-ledger-head)) is how that earlier head stops depending on a human's memory, once the calendar's commitment is upgraded to a Bitcoin attestation.
 - **Anything in a ledger line this build does not recognise.** Unknown JSON fields are ignored so that a record written by a later version still opens here, and they are covered by neither the digest nor the signature. They are inert by construction and nothing should read them. An unknown *format version*, by contrast, is a hard stop: a reader that cannot reproduce a digest cannot honestly call the record verified.
 
 **The bound quantisation puts on the claim.** Rounding to a fixed scale means two *different* models commit to the same `C` if they differ by less than half a step. At the default of 16 fractional bits the step is `2^-16 ≈ 1.5e-5`.
@@ -280,7 +305,7 @@ Six crates, each load-bearing:
 | `serde`, `serde_json` | The ledger and the safetensors header are both JSON read back from untrusted disk. A parser on that boundary is exactly what should not be homegrown. |
 | `fs2` | Advisory file locking. A sidecar lockfile is orphaned by a crash or a `SIGKILL` and then needs deleting by hand; an OS lock lives on the file descriptor and the kernel releases it however the process dies. Raw `flock` is not an option because `tvc-core` forbids unsafe code. |
 
-Hex stays in-tree (`tvc_core::hex`): forty auditable lines, and every digest a verifier acts on passes through it. The CLI adds `clap` and `getrandom`.
+Hex stays in-tree (`tvc_core::hex`): forty auditable lines, and every digest a verifier acts on passes through it. The CLI adds `clap`, `getrandom`, and `ureq` — a blocking HTTPS client, used only by `tvc anchor` to submit the ledger head to a public calendar. Parsing the calendar's response back is hand-written in `tvc-cli/src/anchor.rs` rather than pulled in as a dependency; see that module's doc comment for why.
 
 ---
 
@@ -300,7 +325,9 @@ Hex stays in-tree (`tvc_core::hex`): forty auditable lines, and every digest a v
 │   │   └── error.rs                 error taxonomy
 │   ├── examples/register_model.rs   end-to-end walkthrough as library calls
 │   └── tests/end_to_end.rs          integration tests
-├── tvc-cli/src/main.rs              the `tvc` binary
+├── tvc-cli/src/
+│   ├── main.rs                      the `tvc` binary
+│   └── anchor.rs                    OpenTimestamps calendar anchoring
 ├── .env.example                     TVC_SECRET_KEY template
 └── LICENSE
 ```
@@ -325,7 +352,7 @@ Hex stays in-tree (`tvc_core::hex`): forty auditable lines, and every digest a v
 4. **ONNX ingestion.** A second loader producing `Tensor`, so the commitment scheme is unchanged.
 5. **Circuit registration.** Register the arithmetic circuit for a model alongside its weights, committing to the relation as well as the parameters. Choosing the proving system here is what fills `proof_commitment` with something real rather than a caller-supplied blob.
 6. **Runtime proofs.** Prove an inference was served by the committed weights — the step that closes the closed-weights gap. Requires 5, and requires the quantisation scale to match the inference arithmetic.
-7. **Distribution.** Replicate the ledger and publish the head digest somewhere a consumer can independently see it — a CT-style signed tree head, anchored periodically to a public chain.
+7. **Distribution.** Replicate the ledger, so no single copy is authoritative. The head-anchoring half of this is partly done — `tvc anchor` submits the head to the public OpenTimestamps calendar network, see [Anchoring the ledger head](#anchoring-the-ledger-head) — but independently checking the resulting Bitcoin attestation against a real block header is not, and needs an external chain data source this crate does not have.
 
 ---
 

@@ -17,6 +17,8 @@
 //! `0` on success, `1` on failure. Every verification failure is a non-zero exit
 //! with a message naming what failed, so this is usable in a build gate.
 
+mod anchor;
+
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -29,6 +31,8 @@ use tvc_core::error::TvcError;
 use tvc_core::registry::{ModelRegistry, GENESIS_DIGEST};
 use tvc_core::signer::{unix_now, PublisherKeypair, RegistrationPayload};
 use tvc_core::{hex, PROTOCOL_VERSION};
+
+use anchor::{Anchor, AnchorProof, AnchorStatus, OpenTimestampsCalendar};
 
 /// Environment variable holding the publisher's 32-byte signing key, as hex.
 const SECRET_KEY_VAR: &str = "TVC_SECRET_KEY";
@@ -126,6 +130,20 @@ enum Command {
         registry: PathBuf,
     },
 
+    /// Submit the ledger head to the public OpenTimestamps calendar network.
+    Anchor {
+        /// Path to the registry ledger.
+        #[arg(long, default_value = "registry.jsonl")]
+        registry: PathBuf,
+    },
+
+    /// Check a stored anchor proof against the ledger head.
+    VerifyAnchor {
+        /// Path to the registry ledger.
+        #[arg(long, default_value = "registry.jsonl")]
+        registry: PathBuf,
+    },
+
     /// Run the full setup flow end to end, including a rejected substitution.
     Demo {
         /// Directory to write demo artefacts into.
@@ -175,6 +193,8 @@ fn main() -> ExitCode {
             zk,
         ),
         Command::Audit { registry } => audit(&registry),
+        Command::Anchor { registry } => anchor_ledger(&registry),
+        Command::VerifyAnchor { registry } => verify_anchor(&registry),
         Command::Demo { out } => demo(&out),
     };
 
@@ -411,6 +431,69 @@ fn audit(ledger: &Path) -> Result<(), String> {
             &record.weight_commitment().root_hex()[..16],
             &record.registration.publisher_hex()[..16]
         );
+    }
+    Ok(())
+}
+
+/// Path the anchor proof for `ledger` is stored at: alongside the ledger,
+/// always named `registry.head.ots` regardless of the ledger's own filename.
+fn anchor_proof_path(ledger: &Path) -> PathBuf {
+    match ledger.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.join("registry.head.ots"),
+        _ => PathBuf::from("registry.head.ots"),
+    }
+}
+
+fn anchor_ledger(ledger: &Path) -> Result<(), String> {
+    let registry = ModelRegistry::open(ledger).map_err(describe)?;
+    let head = registry.head();
+    let proof_path = anchor_proof_path(ledger);
+
+    let proof = OpenTimestampsCalendar::default().stamp(head)?;
+    proof.to_file(&proof_path)?;
+
+    println!("Submitted the ledger head to the public OpenTimestamps calendar network.");
+    println!("  ledger             {}", ledger.display());
+    println!("  head               {}", hex::encode(&head));
+    println!("  proof              {}", proof_path.display());
+    println!();
+    println!("A calendar has recorded this commitment. That is a promise from the calendar");
+    println!("operator, not yet an independently checkable fact: it becomes one once the");
+    println!("commitment is folded into a Bitcoin block. Run `tvc verify-anchor` later to");
+    println!("check on that.");
+    Ok(())
+}
+
+fn verify_anchor(ledger: &Path) -> Result<(), String> {
+    let registry = ModelRegistry::open(ledger).map_err(describe)?;
+    let head = registry.head();
+    let proof_path = anchor_proof_path(ledger);
+
+    let proof = AnchorProof::from_file(&proof_path)
+        .map_err(|error| format!("no anchor proof to verify: {error}"))?;
+    let status = OpenTimestampsCalendar::default().verify(head, &proof)?;
+
+    println!("  ledger             {}", ledger.display());
+    println!("  head               {}", hex::encode(&head));
+    match status {
+        AnchorStatus::Unattested => {
+            println!("  status             not attested (offline anchor)");
+        }
+        AnchorStatus::Pending { calendars } => {
+            println!("  status             pending");
+            for calendar in calendars {
+                println!("  calendar           {calendar}");
+            }
+            println!();
+            println!("note: recorded by a calendar, not yet folded into a Bitcoin block.");
+        }
+        AnchorStatus::BitcoinAttested { height } => {
+            println!("  status             attested to Bitcoin block {height}");
+            println!();
+            println!("note: this is what the proof claims, not something this build has checked");
+            println!("      against an actual block header. Confirming it needs an external");
+            println!("      Bitcoin data source, which this build does not have.");
+        }
     }
     Ok(())
 }
