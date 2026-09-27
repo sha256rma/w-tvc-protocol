@@ -7,8 +7,8 @@
 //! ## The problem
 //!
 //! "This is Llama-3.2-1B" is, today, a filename and a README. Nothing connects a
-//! set of weights to a claim by a named party, so a mirror can serve a
-//! distillation under a flagship name, a fine-tune can be redistributed as the
+//! set of weights to a claim by a named party, so a mirror can serve a smaller
+//! derived model under a flagship name, a fine-tune can be redistributed as the
 //! base model, and a consumer has no way to tell. The usual answer is to trust a
 //! hosting platform's account system — which works exactly as far as that
 //! platform's perimeter, and not one step past it.

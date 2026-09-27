@@ -16,7 +16,7 @@ This repository currently implements the **model setup and public registry layer
 
 "This is Llama-3.2-1B" is, today, a filename and a README.
 
-Nothing connects a set of weights to a claim by a named party. A mirror can serve a 1B distillation under a 70B name. A fine-tune can be redistributed as the base model. A provider can quietly swap a cheaper checkpoint behind an API and bill for the flagship.
+Nothing connects a set of weights to a claim by a named party. A mirror can serve a smaller derived model under a flagship name. A fine-tune can be redistributed as the base model. An operator can quietly swap a cheaper checkpoint behind an API and bill for the flagship.
 
 Those are two different problems and it matters which one you are solving.
 
