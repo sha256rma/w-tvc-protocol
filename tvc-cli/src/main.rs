@@ -25,13 +25,17 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use tvc_core::canonical::canonical_digest;
 use tvc_core::commitment::{
-    commit_weights, commit_weights_with_proof, open_weight, verify_weight_opening, Quantizer,
-    SchemeCommitment, Tensor, WeightCommitment, WeightVector,
+    commit_weights, commit_weights_with_proof, Quantizer, SchemeCommitment, Tensor,
+    WeightCommitment, WeightVector,
 };
+use tvc_core::documents::{refs_of, validate_document, ObjectStore};
+use tvc_core::itemset::ItemSet;
+use tvc_core::manifest::WeightsManifest;
 use tvc_core::error::TvcError;
 use tvc_core::registry::{ModelRegistry, GENESIS_DIGEST};
-use tvc_core::signer::{unix_now, PublisherKeypair, RegistrationPayload};
+use tvc_core::signer::{unix_now, DocumentClaim, PublisherKeypair, RegistrationPayload};
 use tvc_core::{hex, PROTOCOL_VERSION};
 
 use anchor::{Anchor, AnchorProof, AnchorStatus, NullAnchor, OpenTimestampsCalendar};
@@ -285,7 +289,7 @@ enum Command {
         registry: PathBuf,
     },
 
-    /// Run the full setup flow end to end, including a rejected substitution.
+    /// Publish and check a reference end to end, offline, then try to cheat it.
     Demo {
         /// Directory to write demo artefacts into.
         #[arg(long, default_value = "demo-out")]
@@ -618,14 +622,37 @@ fn audit(ledger: &Path) -> Result<(), String> {
         println!("  (empty ledger; head is the genesis digest)");
     }
     println!();
-    for record in registry.records() {
-        println!(
-            "  [{}] {:<44} C={} by {}",
-            record.sequence,
-            record.address(),
-            &record.weight_commitment().root_hex()[..16],
-            &record.registration.publisher_hex()[..16]
-        );
+    let mut lines: Vec<(u64, String)> = registry
+        .records()
+        .iter()
+        .map(|record| {
+            (
+                record.sequence,
+                format!(
+                    "{:<20} {:<44} C={} by {}",
+                    "model-registration",
+                    record.address(),
+                    &record.weight_commitment().root_hex()[..16],
+                    &record.registration.publisher_hex()[..16]
+                ),
+            )
+        })
+        .chain(registry.documents().iter().map(|record| {
+            (
+                record.sequence,
+                format!(
+                    "{:<20} {:<44} cites {} by {}",
+                    record.kind(),
+                    hex::encode(&record.document()),
+                    record.signed.claim.refs.len(),
+                    &hex::encode(&record.signed.signer)[..16]
+                ),
+            )
+        }))
+        .collect();
+    lines.sort();
+    for (sequence, line) in lines {
+        println!("  [{sequence}] {line}");
     }
     Ok(())
 }
@@ -812,93 +839,219 @@ fn write_demo_model(path: &Path, seed: u64, tweak: Option<(usize, f32)>) -> Resu
     std::fs::write(path, file).map_err(|error| format!("{}: {error}", path.display()))
 }
 
+/// Signs a document, appends its claim to the ledger and stores it beside it.
+fn demo_publish(
+    registry: &mut ModelRegistry,
+    store: &ObjectStore,
+    keypair: &PublisherKeypair,
+    document: &serde_json::Value,
+) -> Result<[u8; 32], String> {
+    let kind = document["kind"].as_str().ok_or("document has no kind")?.to_owned();
+    let kind_of = |d: &[u8; 32]| registry.get_document(d).map(|r| r.kind().to_owned());
+    validate_document(&kind, document, &kind_of).map_err(describe)?;
+    let refs = refs_of(&kind, document).map_err(describe)?;
+    let digest = canonical_digest(document).map_err(describe)?;
+    let claim = DocumentClaim::new(kind.clone(), digest, refs, unix_now());
+    let signed = keypair.sign_document(&claim, &os_random()?).map_err(describe)?;
+    store.put(document).map_err(describe)?;
+    let record = registry.register_document(signed).map_err(describe)?;
+    println!("   [{}] {:<20} {}", record.sequence, kind, hex::encode(&digest));
+    Ok(digest)
+}
+
 fn demo(out: &Path) -> Result<(), String> {
-    const MODEL_ID: &str = "acme-labs/demo-llm";
-    const VERSION: &str = "1.0.0";
-
+    let model_dir = out.join("model");
     let ledger = out.join("registry.jsonl");
-    let honest_path = out.join("honest.safetensors");
-    let substituted_path = out.join("substituted.safetensors");
+    let store = ObjectStore::beside(&ledger);
     let _ = std::fs::remove_file(&ledger);
+    let _ = std::fs::remove_file(anchor_proof_path(&ledger));
+    let _ = std::fs::remove_dir_all(store.dir());
+    let _ = std::fs::remove_dir_all(&model_dir);
 
-    println!("W-TVC setup demo — {PROTOCOL_VERSION}");
-    println!("Artefacts in {}", out.display());
+    println!("W-TVC demo: a reference anyone can check ({PROTOCOL_VERSION})");
+    println!("Everything runs offline. The model and its outputs are synthetic; the");
+    println!("checks are the real ones. Artefacts in {}", out.display());
     println!();
 
-    println!("1. Simulate a published model.");
-    write_demo_model(&honest_path, 0x5eed, None)?;
-    let weights = load_weights(&honest_path, Quantizer::DEFAULT_FRACTIONAL_BITS)?;
-    println!("   {} — {} tensors, {} weights", honest_path.display(), weights.manifest().len(), weights.len());
-    println!();
-
-    println!("2. Commit to its weights.");
-    let commitment = commit_weights(&weights).map_err(describe)?;
-    print_commitment(&commitment, &weights);
-    println!();
-
-    println!("3. Sign the registration with a publisher keypair.");
-    let keypair = PublisherKeypair::generate(&os_random()?).map_err(describe)?;
-    let payload = RegistrationPayload::new(MODEL_ID, VERSION, commitment.clone(), unix_now());
-    let attestation = keypair.sign(&payload, &os_random()?).map_err(describe)?;
-    println!("   publisher          {}", keypair.public_key_hex());
-    println!(
-        "   sighash            {}",
-        hex::encode(&payload.sighash(&keypair.public_key()))
-    );
-    println!("   signature          {}", attestation.signature_hex());
-    println!();
-
-    println!("4. Append it to the public registry.");
-    let mut registry = ModelRegistry::open(&ledger).map_err(describe)?;
-    let record = registry.register_signed(attestation).map_err(describe)?;
-    println!("   {}", ledger.display());
-    println!("   sequence           {}", record.sequence);
-    println!("   record digest      {}", record.digest_hex());
-    println!("   ledger head        {}", registry.head_hex());
-    println!();
-
-    println!("5. Verify the entry as a consumer would.");
-    registry
-        .verify_model_registration_by(MODEL_ID, &keypair.public_key())
+    println!("1. The reference weights: hash every file in the model directory.");
+    write_demo_model(&model_dir.join("model.safetensors"), 0x5eed, None)?;
+    std::fs::write(model_dir.join("config.json"), b"{\"layers\":1}\n")
+        .map_err(|error| error.to_string())?;
+    let manifest = WeightsManifest::from_dir(&model_dir, "acme-labs/demo-llm", None, None)
         .map_err(describe)?;
-    println!("   signature verifies against the pinned publisher key");
-    registry
-        .verify_weights(MODEL_ID, VERSION, &weights)
-        .map_err(describe)?;
-    println!("   weights on disk recommit to the registered C");
-    registry.verify_chain().map_err(describe)?;
-    println!("   ledger hash chain is intact");
-
-    let opening = open_weight(&weights, 7).map_err(describe)?;
-    verify_weight_opening(&commitment, 7, &weights.elements()[7], &opening).map_err(describe)?;
-    println!(
-        "   opening for W[7] = {} verifies in {} steps",
-        weights.elements()[7].to_hex(),
-        opening.siblings.len()
-    );
-    println!();
-
-    println!("6. Substitute the model and confirm the registry catches it.");
-    // One weight changed out of 96 — the smallest possible downgrade.
-    write_demo_model(&substituted_path, 0x5eed, Some((7, 0.5)))?;
-    let substituted = load_weights(&substituted_path, Quantizer::DEFAULT_FRACTIONAL_BITS)?;
-
-    match registry.verify_weights(MODEL_ID, VERSION, &substituted) {
-        Err(TvcError::CommitmentMismatch { expected, observed }) => {
-            println!("   rejected, as it must be:");
-            println!("     registered C     {expected}");
-            println!("     substituted C    {observed}");
-        }
-        Err(other) => return Err(format!("demo produced an unexpected failure: {}", describe(other))),
-        Ok(_) => {
-            return Err("demo invariant broken: substituted weights were accepted".to_owned())
-        }
+    for file in &manifest.files {
+        println!("   {}  {:>6} bytes  {}", &hex::encode(&file.sha256)[..16], file.size, file.path);
     }
+    println!();
+
+    println!("2. Publish the reference as four signed records, each citing the one before.");
+    let keypair = PublisherKeypair::generate(&os_random()?).map_err(describe)?;
+    let mut registry = ModelRegistry::open(&ledger).map_err(describe)?;
+    let weights = demo_publish(&mut registry, &store, &keypair, &manifest.to_json())?;
+    let setup = demo_publish(
+        &mut registry,
+        &store,
+        &keypair,
+        &serde_json::json!({
+            "kind": "reference-setup/v1",
+            "weights": hex::encode(&weights),
+            "engine": "demo",
+            "engine_version": "0",
+            "dtype": "float32",
+            "hardware": "this machine",
+            "context_length": 4096,
+            "decoding": {"temperature": "0", "seed": "42"},
+        }),
+    )?;
+
+    // Secret test prompts, and what the reference model said to them. In a
+    // real run the outputs come from the model; here they are written by hand.
+    let prompts = vec![
+        serde_json::json!({"id": 0, "prompt": "What is the capital of Australia?"}),
+        serde_json::json!({"id": 1, "prompt": "What is 4821 multiplied by 37?"}),
+        serde_json::json!({"id": 2, "prompt": "Repeat exactly: 東京は日本の首都です。"}),
+        serde_json::json!({"id": 3, "prompt": "What does <|im_start|> mean to you?"}),
+    ];
+    let outputs = vec![
+        serde_json::json!({"id": 0, "response": "Canberra."}),
+        serde_json::json!({"id": 1, "response": "178377"}),
+        serde_json::json!({"id": 2, "response": "東京は日本の首都です。"}),
+        serde_json::json!({"id": 3, "response": "It looks like a control token."}),
+    ];
+    let salts = |n: usize| (0..n).map(|_| os_random()).collect::<Result<Vec<_>, _>>();
+    let prompt_set = ItemSet::commit(prompts, salts(4)?).map_err(describe)?;
+    let output_set = ItemSet::commit(outputs, salts(4)?).map_err(describe)?;
+    let run = demo_publish(
+        &mut registry,
+        &store,
+        &keypair,
+        &serde_json::json!({
+            "kind": "reference-run/v1",
+            "setup": hex::encode(&setup),
+            "date": "2026-10-04",
+            "prompts": {"root": hex::encode(&prompt_set.root().tree_root), "count": 4},
+            "outputs": {"root": hex::encode(&output_set.root().tree_root), "count": 4},
+            "samples_per_prompt": 1,
+            "bands": [],
+        }),
+    )?;
+    let profile = demo_publish(
+        &mut registry,
+        &store,
+        &keypair,
+        &serde_json::json!({
+            "kind": "profile/v1",
+            "model": "acme-labs/demo-llm",
+            "version": "0.1",
+            "maturity": "working",
+            "weights": hex::encode(&weights),
+            "runs": [hex::encode(&run)],
+        }),
+    )?;
+    println!("   The prompts and outputs are not published, only their roots.");
+    println!();
+
+    println!("3. Timestamp the ledger head. (Offline here, so no outside party sees it;");
+    println!("   `tvc anchor` sends it to the public OpenTimestamps calendars instead.)");
+    NullAnchor
+        .stamp(registry.head())?
+        .to_file(&anchor_proof_path(&ledger))?;
+    println!();
+
+    println!("4. Check the whole reference as an outsider would, pinning the publisher key.");
+    let code = reference::verify_reference(
+        &ledger,
+        &hex::encode(&profile),
+        &keypair.public_key_hex(),
+        Some(&model_dir),
+        false,
+    )?;
+    if code != 0 {
+        return Err(format!("demo invariant broken: an honest reference failed with code {code}"));
+    }
+    println!();
+
+    println!("5. A provider disputes a verdict. Reveal the one prompt it is about.");
+    let revealed = prompt_set.reveal(1).map_err(describe)?;
+    revealed
+        .verify(&prompt_set.root().tree_root, 4)
+        .map_err(describe)?;
+    println!("   prompt 1 opens against the root published in step 2: {}", revealed.item["prompt"]);
+    println!("   it was in the set before any check used it; it was not written afterwards.");
+    println!();
+
+    println!("6. Now try to cheat, five ways.");
+    let refuse = |label: &str, outcome: Result<(), String>| -> Result<(), String> {
+        match outcome {
+            Err(reason) => {
+                println!("   refused  {label}");
+                println!("            {reason}");
+                Ok(())
+            }
+            Ok(()) => Err(format!("demo invariant broken: {label} was accepted")),
+        }
+    };
+
+    let mut easier = revealed.clone();
+    easier.item = serde_json::json!({"id": 1, "prompt": "What is 2 plus 2?"});
+    refuse(
+        "swap in an easier prompt after the fact",
+        easier.verify(&prompt_set.root().tree_root, 4).map_err(describe),
+    )?;
+
+    let mut moved = revealed.clone();
+    moved.index = 2;
+    refuse(
+        "present prompt 1 as if it were prompt 2",
+        moved.verify(&prompt_set.root().tree_root, 4).map_err(describe),
+    )?;
+
+    // One weight changed out of 96: the smallest possible substitution.
+    write_demo_model(&model_dir.join("model.safetensors"), 0x5eed, Some((7, 0.5)))?;
+    refuse(
+        "run the reference on weights with one value changed",
+        match manifest.verify_dir(&model_dir).map_err(describe)? {
+            found if found.is_empty() => Ok(()),
+            found => Err(found[0].to_string()),
+        },
+    )?;
+    write_demo_model(&model_dir.join("model.safetensors"), 0x5eed, None)?;
+
+    let late = serde_json::json!({
+        "kind": "reference-run/v1",
+        "setup": hex::encode(&[0xab; 32]),
+        "date": "2026-10-04",
+        "prompts": {"root": hex::encode(&[1; 32]), "count": 1},
+        "outputs": {"root": hex::encode(&[2; 32]), "count": 1},
+        "samples_per_prompt": 1,
+        "bands": [],
+    });
+    let claim = DocumentClaim::new(
+        "reference-run/v1",
+        canonical_digest(&late).map_err(describe)?,
+        vec![[0xab; 32]],
+        unix_now(),
+    );
+    let signed = keypair.sign_document(&claim, &os_random()?).map_err(describe)?;
+    refuse(
+        "publish a run citing a setup that is not in the ledger yet",
+        registry.register_document(signed).map(|_| ()).map_err(describe),
+    )?;
+
+    let impostor = PublisherKeypair::generate(&os_random()?).map_err(describe)?;
+    let profile_claim = registry.get_document(&profile).ok_or("profile vanished")?;
+    refuse(
+        "pass off this reference as another publisher's",
+        profile_claim
+            .signed
+            .verify_signed_by(&impostor.public_key())
+            .map_err(describe),
+    )?;
 
     println!();
-    println!("Done. Inspect the ledger with:");
+    println!("Done. Look around with:");
     println!("  tvc audit --registry {}", ledger.display());
-    println!("  tvc get --model-id {MODEL_ID} --registry {}", ledger.display());
+    println!("  tvc show --digest {} --registry {}", hex::encode(&profile), ledger.display());
     Ok(())
 }
 
