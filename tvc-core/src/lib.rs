@@ -124,6 +124,7 @@
 pub mod canonical;
 pub mod commitment;
 pub mod digest;
+pub mod documents;
 pub mod error;
 pub mod hex;
 pub mod itemset;
