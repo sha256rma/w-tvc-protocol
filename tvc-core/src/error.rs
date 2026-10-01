@@ -127,6 +127,13 @@ pub enum TvcError {
     },
     /// An underlying filesystem operation failed.
     Io(String),
+    /// A published document is not well formed for its declared kind.
+    ///
+    /// Raised for anything a third party would read back and act on: a JSON
+    /// value that has no canonical encoding, a manifest whose paths could
+    /// escape the model directory, a reference record pointing at the wrong
+    /// kind of document, or an item reveal that does not open against its root.
+    InvalidDocument(String),
 }
 
 impl fmt::Display for TvcError {
@@ -190,6 +197,7 @@ impl fmt::Display for TvcError {
                 "another writer appended to the ledger: it was {expected} bytes when read, {observed} now; reopen the registry and retry"
             ),
             Self::Io(detail) => write!(f, "filesystem failure: {detail}"),
+            Self::InvalidDocument(detail) => write!(f, "invalid document: {detail}"),
         }
     }
 }

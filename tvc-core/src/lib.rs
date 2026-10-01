@@ -121,10 +121,12 @@
 
 #![doc(html_root_url = "https://docs.rs/tvc-core/0.2.0")]
 
+pub mod canonical;
 pub mod commitment;
 pub mod digest;
 pub mod error;
 pub mod hex;
+pub mod manifest;
 pub mod registry;
 pub mod signer;
 
