@@ -42,6 +42,14 @@ pub const DOMAIN_REGISTRATION_SIGHASH: &str = "W-TVC/v1/registration-sighash";
 pub const DOMAIN_LEDGER_CHAIN: &str = "W-TVC/v1/ledger-chain";
 /// Tag for deriving a publisher signing scalar from caller-supplied entropy.
 pub const DOMAIN_PUBLISHER_KEY: &str = "W-TVC/v1/publisher-key";
+/// Tag for one salted reference item (a prompt or an output) in an item set.
+pub const DOMAIN_ITEM_LEAF: &str = "W-TVC/v2/item-leaf";
+/// Tag for deriving which items of a committed set get selected.
+pub const DOMAIN_ITEM_SELECT: &str = "W-TVC/v2/item-select";
+/// Prefix of the per-kind tag a document signature is computed under.
+pub const DOMAIN_DOCUMENT_SIGHASH_PREFIX: &str = "W-TVC/v2/document/";
+/// Tag for the record hash chain once documents are in the ledger.
+pub const DOMAIN_LEDGER_DOCUMENT: &str = "W-TVC/v2/ledger-document";
 
 /// Computes a BIP-340 tagged hash over length-prefixed message parts.
 pub fn tagged_hash(tag: &str, parts: &[&[u8]]) -> [u8; 32] {

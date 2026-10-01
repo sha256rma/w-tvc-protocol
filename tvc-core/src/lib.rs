@@ -126,6 +126,7 @@ pub mod commitment;
 pub mod digest;
 pub mod error;
 pub mod hex;
+pub mod itemset;
 pub mod manifest;
 pub mod registry;
 pub mod signer;

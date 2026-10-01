@@ -883,15 +883,29 @@ impl MerkleProver {
     ///
     /// Returns [`TvcError::EmptyWeights`] if the vector holds no elements.
     pub fn build(vector: &[FieldElement]) -> Result<Self> {
-        if vector.is_empty() {
+        Self::from_leaves(
+            vector
+                .iter()
+                .enumerate()
+                .map(|(index, element)| MerkleVectorCommitment::leaf(index, element))
+                .collect(),
+        )
+    }
+
+    /// Builds the tree over leaf hashes the caller has already computed.
+    ///
+    /// The tree shape, promotion rule and openings are the same whatever the
+    /// leaves commit to; only the leaf hash differs. Weights use
+    /// `W-TVC/v1/weight-leaf` and reference items use their own tag (see
+    /// [`crate::itemset`]), so a leaf from one can never stand in for the other.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TvcError::EmptyWeights`] if there are no leaves.
+    pub fn from_leaves(leaves: Vec<[u8; 32]>) -> Result<Self> {
+        if leaves.is_empty() {
             return Err(TvcError::EmptyWeights);
         }
-
-        let leaves: Vec<[u8; 32]> = vector
-            .iter()
-            .enumerate()
-            .map(|(index, element)| MerkleVectorCommitment::leaf(index, element))
-            .collect();
 
         let mut levels = vec![leaves];
         while levels.last().expect("non-empty").len() > 1 {
@@ -997,37 +1011,54 @@ impl VectorCommitment for MerkleVectorCommitment {
         element: &FieldElement,
         proof: &MerkleOpening,
     ) -> Result<bool> {
-        if commitment.length == 0 || index as u64 >= commitment.length {
-            return Ok(false);
-        }
-
-        let mut running = MerkleVectorCommitment::leaf(index, element);
-        let mut position = index;
-        let mut width = commitment.length as usize;
-        let mut consumed = 0usize;
-
-        while width > 1 {
-            let sibling = position ^ 1;
-            if sibling < width {
-                let Some(hash) = proof.siblings.get(consumed) else {
-                    return Ok(false); // path is shorter than the tree requires
-                };
-                running = if position % 2 == 1 {
-                    MerkleVectorCommitment::node(hash, &running)
-                } else {
-                    MerkleVectorCommitment::node(&running, hash)
-                };
-                consumed += 1;
-            }
-            position /= 2;
-            width = width.div_ceil(2);
-        }
-
-        if consumed != proof.siblings.len() {
-            return Ok(false); // path carries steps the tree has no place for
-        }
-        Ok(running == commitment.tree_root)
+        Ok(verify_merkle_path(
+            MerkleVectorCommitment::leaf(index, element),
+            index,
+            commitment,
+            &proof.siblings,
+        ))
     }
+}
+
+/// Walks a canonical opening from a leaf hash to the root.
+///
+/// Shared by weight openings and item reveals. Direction comes from `index`
+/// and the expected step count from `commitment.length`, so there is exactly
+/// one accepting path for any (index, leaf) pair.
+pub(crate) fn verify_merkle_path(
+    leaf: [u8; 32],
+    index: usize,
+    commitment: &MerkleCommitment,
+    siblings: &[[u8; 32]],
+) -> bool {
+    if commitment.length == 0 || index as u64 >= commitment.length {
+        return false;
+    }
+
+    let mut running = leaf;
+    let mut position = index;
+    let mut width = commitment.length as usize;
+    let mut consumed = 0usize;
+
+    while width > 1 {
+        let sibling = position ^ 1;
+        if sibling < width {
+            let Some(hash) = siblings.get(consumed) else {
+                return false; // path is shorter than the tree requires
+            };
+            running = if position % 2 == 1 {
+                MerkleVectorCommitment::node(hash, &running)
+            } else {
+                MerkleVectorCommitment::node(&running, hash)
+            };
+            consumed += 1;
+        }
+        position /= 2;
+        width = width.div_ceil(2);
+    }
+
+    // A path carrying steps the tree has no place for is rejected on shape.
+    consumed == siblings.len() && running == commitment.tree_root
 }
 
 // ---------------------------------------------------------------------------
