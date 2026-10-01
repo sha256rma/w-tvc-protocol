@@ -134,8 +134,32 @@ impl AnchorProof {
     /// interpreted here — that happens in [`Anchor::verify`], which knows
     /// which format to expect.
     pub fn from_file(path: &Path) -> Result<Self> {
-        let bytes = std::fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
+        let bytes =
+            std::fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
         Ok(Self { bytes })
+    }
+
+    /// The digest this proof commits to, read from either proof format.
+    ///
+    /// A verifier uses this to ask "which ledger head was anchored", which can
+    /// differ from the current head once the ledger has grown.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message if the bytes are neither a null-anchor proof nor a
+    /// parseable OpenTimestamps file.
+    pub fn committed_digest(&self) -> Result<[u8; 32]> {
+        if self.is_null() {
+            let mut digest = [0u8; 32];
+            digest.copy_from_slice(&self.bytes[NULL_MAGIC.len()..]);
+            return Ok(digest);
+        }
+        Ok(parse_proof(&self.bytes)?.digest)
+    }
+
+    /// Whether this is a [`NullAnchor`] proof, which no outside party saw.
+    pub fn is_null(&self) -> bool {
+        self.bytes.len() == NULL_MAGIC.len() + 32 && self.bytes.starts_with(NULL_MAGIC)
     }
 }
 

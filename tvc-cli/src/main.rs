@@ -18,6 +18,8 @@
 //! with a message naming what failed, so this is usable in a build gate.
 
 mod anchor;
+mod hf;
+mod reference;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -144,6 +146,142 @@ enum Command {
         registry: PathBuf,
     },
 
+    /// Hash every file in a model directory into a weights manifest.
+    Manifest {
+        /// The model directory, e.g. a Hugging Face download.
+        #[arg(long)]
+        dir: PathBuf,
+        /// Model name the reference refers to.
+        #[arg(long)]
+        model: String,
+        /// Hugging Face repository the files came from.
+        #[arg(long, requires = "hf_commit")]
+        hf_repo: Option<String>,
+        /// Hugging Face commit (40 hex characters) the files came from.
+        #[arg(long, requires = "hf_repo")]
+        hf_commit: Option<String>,
+        /// Where to write the manifest.
+        #[arg(long, default_value = "manifest.json")]
+        out: PathBuf,
+    },
+
+    /// Check that a directory holds exactly the files a manifest lists.
+    VerifyDir {
+        /// Path to the manifest.
+        #[arg(long)]
+        manifest: PathBuf,
+        /// The model directory to check.
+        #[arg(long)]
+        dir: PathBuf,
+    },
+
+    /// Compare a manifest with the files Hugging Face publishes at its commit.
+    CheckHf {
+        /// Path to the manifest.
+        #[arg(long)]
+        manifest: PathBuf,
+    },
+
+    /// Commit to a JSONL file of secret items (prompts or outputs).
+    CommitItems {
+        /// One JSON value per line.
+        #[arg(long)]
+        items: PathBuf,
+        /// Where to write the private file holding items and salts.
+        #[arg(long)]
+        private: PathBuf,
+    },
+
+    /// Reveal one committed item with its proof.
+    Reveal {
+        /// The private file written by commit-items.
+        #[arg(long)]
+        private: PathBuf,
+        /// Zero-based index of the item.
+        #[arg(long)]
+        index: usize,
+        /// Where to write the reveal.
+        #[arg(long, default_value = "reveal.json")]
+        out: PathBuf,
+    },
+
+    /// Check a revealed item against a published reference run.
+    VerifyReveal {
+        /// The reveal file.
+        #[arg(long)]
+        reveal: PathBuf,
+        /// Digest of the reference-run document.
+        #[arg(long)]
+        run: String,
+        /// Which set the item belongs to: prompts or outputs.
+        #[arg(long)]
+        set: String,
+        /// Path to the registry ledger.
+        #[arg(long, default_value = "registry.jsonl")]
+        registry: PathBuf,
+    },
+
+    /// Pick items from a committed set in a way nobody can steer.
+    Sample {
+        /// Digest of the reference-run document.
+        #[arg(long)]
+        run: String,
+        /// Which set to pick from: prompts or outputs.
+        #[arg(long)]
+        set: String,
+        /// How many to pick.
+        #[arg(long)]
+        k: u64,
+        /// What the selection is for, e.g. an endpoint and a date.
+        #[arg(long)]
+        context: String,
+        /// Path to the registry ledger.
+        #[arg(long, default_value = "registry.jsonl")]
+        registry: PathBuf,
+    },
+
+    /// Sign a document and append its claim to the ledger.
+    Publish {
+        /// A JSON document with a kind field.
+        #[arg(long)]
+        doc: PathBuf,
+        /// Path to the registry ledger.
+        #[arg(long, default_value = "registry.jsonl")]
+        registry: PathBuf,
+    },
+
+    /// Print a published document and the claim about it.
+    Show {
+        /// The document's digest.
+        #[arg(long)]
+        digest: String,
+        /// Path to the registry ledger.
+        #[arg(long, default_value = "registry.jsonl")]
+        registry: PathBuf,
+    },
+
+    /// Check a reference profile and everything it cites, check by check.
+    ///
+    /// Exit codes: 0 every check that ran passed; 2 ledger; 3 profile or
+    /// signature; 4 document; 5 weights on disk; 6 anchor.
+    VerifyReference {
+        /// Digest of the profile document.
+        #[arg(long)]
+        profile: String,
+        /// Publisher x-only public key to pin, as 64 hex characters.
+        #[arg(long)]
+        publisher: String,
+        /// Also re-hash a local copy of the weights against the manifest.
+        #[arg(long)]
+        weights_dir: Option<PathBuf>,
+        /// Print the result as JSON.
+        #[arg(long)]
+        json: bool,
+        /// Path to the registry ledger.
+        #[arg(long, default_value = "registry.jsonl")]
+        registry: PathBuf,
+    },
+
     /// Run the full setup flow end to end, including a rejected substitution.
     Demo {
         /// Directory to write demo artefacts into.
@@ -154,6 +292,29 @@ enum Command {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+
+    if let Command::VerifyReference {
+        profile,
+        publisher,
+        weights_dir,
+        json,
+        registry,
+    } = &cli.command
+    {
+        return match reference::verify_reference(
+            registry,
+            profile,
+            publisher,
+            weights_dir.as_deref(),
+            *json,
+        ) {
+            Ok(code) => ExitCode::from(code),
+            Err(message) => {
+                eprintln!("error: {message}");
+                ExitCode::FAILURE
+            }
+        };
+    }
 
     let outcome = match cli.command {
         Command::Keygen => keygen(),
@@ -195,6 +356,37 @@ fn main() -> ExitCode {
         Command::Audit { registry } => audit(&registry),
         Command::Anchor { registry } => anchor_ledger(&registry),
         Command::VerifyAnchor { registry } => verify_anchor(&registry),
+        Command::Manifest {
+            dir,
+            model,
+            hf_repo,
+            hf_commit,
+            out,
+        } => reference::manifest(&dir, &model, hf_repo, hf_commit, &out),
+        Command::VerifyDir { manifest, dir } => reference::verify_dir(&manifest, &dir),
+        Command::CheckHf { manifest } => reference::check_hf(&manifest),
+        Command::CommitItems { items, private } => reference::commit_items(&items, &private),
+        Command::Reveal {
+            private,
+            index,
+            out,
+        } => reference::reveal(&private, index, &out),
+        Command::VerifyReveal {
+            reveal,
+            run,
+            set,
+            registry,
+        } => reference::verify_reveal(&reveal, &registry, &run, &set),
+        Command::Sample {
+            run,
+            set,
+            k,
+            context,
+            registry,
+        } => reference::sample(&registry, &run, &set, k, &context),
+        Command::Publish { doc, registry } => reference::publish(&doc, &registry),
+        Command::Show { digest, registry } => reference::show(&registry, &digest),
+        Command::VerifyReference { .. } => unreachable!("handled above"),
         Command::Demo { out } => demo(&out),
     };
 
