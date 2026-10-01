@@ -1,8 +1,16 @@
-//! # W-TVC — Verifiable Model Identity: setup and public registry
+//! # W-TVC: signed, checkable records of which model weights were run
 //!
-//! Cryptographic core for binding an AI model's weights to the identity of the
-//! lab that published them, so that anyone holding a copy of a model can check
-//! whether it is the model its publisher attested to.
+//! Two uses share this crate and its ledger.
+//!
+//! **Reference transparency** (the current focus). A model checker such as
+//! SPOT compares endpoints with reference answers from running the real model.
+//! [`manifest`], [`itemset`] and [`documents`] let it publish which weight files
+//! a reference used, how they were run, and a salted commitment to the secret
+//! prompts and outputs, so anyone can check the reference without trusting the
+//! checker. See `docs/spec.md` in the repository for the formats.
+//!
+//! **Weight registration** (earlier work, below). A publisher binds a quantised
+//! commitment to its weights to its key, so anyone holding a copy can check it.
 //!
 //! ## The problem
 //!
@@ -32,9 +40,13 @@
 //!
 //! | Module | Role |
 //! |---|---|
+//! | [`canonical`] | Canonical JSON and the plain SHA-256 that names a document. |
+//! | [`manifest`] | Per-file SHA-256 manifests of a model directory, and checking a directory against one. |
+//! | [`itemset`] | Salted commitments to secret items, single-item reveals, and Fiat-Shamir selection. |
+//! | [`documents`] | The four reference document kinds, their validation, and the object store. |
 //! | [`commitment`] | Weight loading, quantisation, and `C = Commit(W)`. Split into a scheme layer ([`commitment::VectorCommitment`]) and a protocol layer ([`commitment::WeightCommitment`]). |
-//! | [`signer`] | Publisher keys, the registration payload, BIP-340 attestations. |
-//! | [`registry`] | The append-only, hash-chained public ledger. |
+//! | [`signer`] | Publisher keys, registration payloads, document claims, BIP-340 signatures. |
+//! | [`registry`] | The append-only, hash-chained ledger of registrations (v2) and document claims (v3). |
 //! | [`digest`] | BIP-340 tagged hashing and domain separation. |
 //! | [`hex`] | Strict lowercase hex codec used on every boundary. |
 //! | [`error`] | The error taxonomy. |
@@ -62,8 +74,9 @@
 //! change that fixes that, deferred until the proving system is chosen. ONNX
 //! ingestion is not implemented — [`commitment::Tensor`] is the interface a
 //! loader produces, and only safetensors has one today. And the registry is a
-//! local file: replication, and publishing the head digest somewhere a consumer
-//! can independently see it, are out of scope for this phase.
+//! local file. Its head can be timestamped on Bitcoin with `tvc anchor`, which
+//! lives in the CLI because this crate makes no network calls; replicating the
+//! ledger itself is not done here.
 //!
 //! **Bounded by design, not by omission.** Openings are `O(log n)` from a
 //! [`commitment::MerkleProver`] but the tree is held in memory, so this phase

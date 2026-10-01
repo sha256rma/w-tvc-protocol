@@ -77,7 +77,7 @@ fn is_decimal(value: &str) -> bool {
         None => (unsigned, None),
     };
     let digits = |part: &str| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit());
-    digits(whole) && fraction.map_or(true, digits)
+    digits(whole) && fraction.is_none_or(digits)
 }
 
 fn decimal<'a>(kind: &str, value: &'a Value, key: &str) -> Result<&'a str> {

@@ -1,6 +1,6 @@
-# W-TVC Protocol
+# W-TVC
 
-**Verifiable Model Identity** — bind a set of AI model weights to the identity of the lab that published them, so anyone holding a copy can check whether it is the model its publisher attested to.
+W-TVC lets a model checker prove what it ran. Into a signed, append-only log it publishes the weight files a reference run used, the settings it ran with, and commitments to the secret prompts and to the outputs. Anyone can check the log without trusting the checker, and its head is timestamped on Bitcoin.
 
 Built for **Bitshala BOSS Battle** · Tracks: **Machine Money** × **Freedom Stack**
 
@@ -8,353 +8,191 @@ Built for **Bitshala BOSS Battle** · Tracks: **Machine Money** × **Freedom Sta
 Ship code. Beat the boss.
 ```
 
-This repository currently implements the **model setup and public registry layer**. The zkML circuit and proving layer is future work; see [Roadmap](#roadmap).
-
----
-
 ## The problem
 
-"This is Llama-3.2-1B" is, today, a filename and a README.
+Providers sell access to open models by name, and some serve a cheaper model or a 4-bit copy under that name. On 5 May 2026 a strict client caught a private-inference gateway answering as `Qwen/Qwen3.5-122B-A10B` while billing for `deepseek-ai/DeepSeek-V3.1` ([awesome-private-inference](https://github.com/amiller/awesome-private-inference)).
 
-Nothing connects a set of weights to a claim by a named party. A mirror can serve a smaller derived model under a flagship name. A fine-tune can be redistributed as the base model. An operator can quietly swap a cheaper checkpoint behind an API and bill for the flagship.
+The way to catch this from outside is to compare the endpoint with reference answers produced by running the real model yourself. That's what our checking service, [authenticated.si](https://authenticated.si) (SPOT), does. But every verdict then rests on the reference, and a provider flagged as "likely swapped" will ask four fair questions:
 
-Those are two different problems and it matters which one you are solving.
+1. Which weights did you run?
+2. How did you run them?
+3. Which prompts did you use, and what did your model say?
+4. Did you change your reference after you saw my output?
 
-**Open weights.** You can download `W`. What is missing is an artefact to check it against — a signed statement from a named party saying "this is what we shipped".
+Today the honest answer to all four is "trust us". W-TVC replaces that with things a third party can recompute.
 
-**Closed weights.** You will never have `W`. The lab has it and you do not trust the lab. No amount of hashing on your side helps, because you have nothing to hash. What you need is (a) the lab irrevocably on record for one specific model, and (b) a way to check that a served inference came from *that* model. (b) requires zero-knowledge proofs of inference, and **is not implemented here** — see [Roadmap](#roadmap). (a) is.
+## What W-TVC publishes
 
-The usual answer to both is to trust a hosting platform's account system. That works exactly as far as the platform's perimeter and not one step past it.
+A reference is a chain of four signed documents. Each one names the one before it by SHA-256.
 
-## The approach
+```
+weights-manifest/v1   every file the reference loaded: path, size, sha256       (public)
+       ▲
+reference-setup/v1    engine, version, dtype, hardware, decoding settings,
+                      chat-template and system-prompt digests                   (public, self-reported)
+       ▲
+reference-run/v1      salted Merkle roots of the prompts and of the outputs,
+                      sample counts, determinism, measured bands                (roots public, items secret)
+       ▲
+profile/v1            one handbook entry: model, version, maturity
+```
 
-Make the weights themselves the thing that is named, and let a **key** rather than a platform do the naming.
+The signed claims go in an append-only, hash-chained ledger (`registry.jsonl`). The documents sit beside it as `objects/<sha256>.json`, so `sha256sum` on any of them prints its own file name. The ledger head is submitted to the OpenTimestamps calendars and ends up in a Bitcoin block.
 
-| Stage | What happens |
-|---|---|
-| **Commit** | Weight tensors are quantised to a field vector and reduced to a 32-byte commitment `C`. |
-| **Attest** | The publishing lab signs `(publisher, model_id, version, C, timestamp)` with a BIP-340 Schnorr signature. |
-| **Register** | The signed attestation is appended to a hash-chained, append-only ledger. |
-| **Verify** | Depends on which problem you have — see below. |
-
-### What "verify" means in each case
-
-| | Open weights | Closed weights |
+| The provider asks | What answers it | How anyone checks |
 |---|---|---|
-| Check the signature against a pinned key | ✅ | ✅ |
-| Recompute `C` from `W` and compare | ✅ | ✖ you have no `W` |
-| Open individual weights against `C` | ✅ | only the lab can produce these |
-| Bind a **served inference** to `C` | n/a | ⏳ needs the proving layer |
+| Which weights? | the weights manifest | `tvc check-hf` compares it with the SHA-256 Hugging Face publishes for every large file, so 988 MB of weights are checked without downloading them. `tvc verify-dir` re-hashes a local copy. |
+| How were they run? | the setup record | It can't be changed after publication, and it's specific enough to re-run. It's the publisher's own description, and it says so. |
+| Which prompts, which answers? | the run record's two roots | When a verdict is disputed, `tvc reveal` opens the prompts in question with a Merkle proof. `tvc verify-reveal` confirms they were in the set at publication, at that position. |
+| Changed afterwards? | ledger order and the Bitcoin timestamp | A record can only cite records already in the ledger, and the anchored head dates the whole ledger up to that point. |
 
-For open weights that is a complete story. For closed weights what you get today is **non-repudiation and consistency, not correctness**: the lab is on record for a specific `C`, and once the proving layer exists every inference must prove against that same `C`, so they cannot show one model to benchmarkers and serve another to customers. Nothing here establishes that the committed weights are any good, and nothing can.
+The prompts stay secret on purpose. If they were public, a provider could recognise them and send only those to the real model. So SPOT commits to them first and reveals them one at a time, when there's a reason to. I think this is the one place where publishing everything would make the system easier to cheat.
 
-### The dual commitment
+## Try it
 
-Because of that gap, a registration binds **two** commitments under one signature:
-
-```
-C = tagged_hash( hash_commitment ‖ proof_commitment? ‖ length ‖ scale ‖ manifest )
-```
-
-- **`hash_commitment`** — a SHA-256 Merkle root. Always present. Anyone holding the weights recomputes it on a laptop, no trusted setup.
-- **`proof_commitment`** — optional, the proving system's own commitment (a KZG `G1` point, a Poseidon root). Present once a proving system is chosen.
-
-The second exists because a hash tree is the wrong object to check *inside* a circuit. Verifying a SHA-256 Merkle root over `n` weights costs roughly `2n` compressions at ~25–30k constraints each: for a billion-parameter model that is ~5×10¹³ constraints, several orders of magnitude past feasible. Poseidon cuts it ~100× and is still infeasible. The workable answer is for the weight commitment to *be* the commitment the proving system already produces for its witness columns, where binding costs almost nothing.
-
-Both are folded into `C` and therefore covered by one signature — so the fast public identity and the in-circuit identity cannot drift apart. A publisher who signed for open weights cannot silently acquire a circuit identity later; that changes `C` and the signature stops verifying.
-
-**A trap this creates.** `C` commits to weights quantised at a declared scale. A proof built against `proof_commitment` is a proof about the *quantised* vector — so if the deployed model serves `bf16` while the commitment is at `2^-16`, the proof is about different arithmetic than the thing answering requests. For closed weights the scale has to match the inference arithmetic, not the storage format.
-
----
-
-## Quick start
+Five commands, from the repository root. None of them needs a GPU, and only the last two touch the network.
 
 ```bash
-cargo test          # 98 tests
-cargo run --bin tvc -- demo
+cargo test --workspace
+
+# The whole story offline, ending with five cheating attempts that get refused.
+cargo run --release --bin tvc -- demo
+
+# Check the real reference in reference/ as an outsider would.
+cargo run --release --bin tvc -- verify-reference --registry reference/registry.jsonl \
+  --profile dc7d054fbd75b6c74055ab3e6c074c5a28e3606296e0a3afce05372a92616374 \
+  --publisher 8f738e4f8e4b3ce2b820dcc9cea88635f0992a56f23eccbc4b5a8d968db421cd
+
+# Compare the published Qwen manifest with Hugging Face, without downloading the weights.
+cargo run --release --bin tvc -- check-hf \
+  --manifest reference/objects/3f976cbf5f3e4ad9b15f23c1a16987851be036b2179d1025e983f4c68b2cf82c.json
+
+# Ask the calendar whether the ledger head has reached a Bitcoin block yet.
+cargo run --release --bin tvc -- verify-anchor --registry reference/registry.jsonl
 ```
 
-`tvc demo` runs the whole flow into `demo-out/`: it simulates a model, commits to its weights, signs the registration, appends it to a ledger, verifies the entry, opens a single weight against the commitment, then substitutes one weight out of ninety-six and confirms the registry rejects it.
+`verify-reference` prints nine named checks and exits non-zero on the first class of failure: 2 ledger, 3 signature, 4 document, 5 weights on disk, 6 anchor. Add `--json` for machine output. [`docs/verify-yourself.md`](docs/verify-yourself.md) walks through every claim with commands you can paste.
 
-For the same flow as library calls rather than CLI output:
+## A real reference: Qwen2.5-0.5B-Instruct
 
-```bash
-cargo run --example register_model
-```
+`reference/` holds a ledger built on 2 October 2026 (IST) under a demo publisher key, `8f738e4f`. It isn't SPOT's production key. The ledger head `0fd05073` was submitted to the OpenTimestamps calendar at 2026-10-01 19:51 UTC.
 
-### Registering a real model
+There are two profiles, because there are two artefacts:
 
-```bash
-# 1. Generate a publisher identity. The secret key is printed once, never stored.
-cargo run --bin tvc -- keygen
-export TVC_SECRET_KEY=<the secret key it printed>
+- **Skeleton** (`0a372de8`). The Hugging Face safetensors at commit `7ae557604adf`. All eight files match the hub. `model.safetensors` matches the hub's LFS hash `fdf756fa` without being downloaded. There are no runs, because this machine has no PyTorch build for its Intel CPU and Python 3.14, so it can't run safetensors. The handbook calls a profile like this a skeleton.
+- **Working** (`dc7d054f`). Ollama's `qwen2.5:0.5b` build of the same model, a 4-bit `Q4_K_M` GGUF, run with Ollama 0.24.0 on an Intel Core i9-9980HK with no GPU. Twelve prompts, three samples each at temperature 0 and seed 42. All twelve reproduced byte for byte across samples. The bands hold only measured values: Ollama counted 195 prompt tokens over the four tokenizer prompts and 554 over all twelve, identical on every sample.
 
-# 2. Inspect a commitment without registering anything.
-cargo run --bin tvc -- commit --weights model.safetensors
+The two builds have different manifests (`3f976cbf` and `1fc98d37`), as they should. That gap is exactly the "quantised copy" case SPOT exists to catch. The setup record also pins Ollama's default system prompt for this tag ("You are Qwen, created by Alibaba Cloud. You are a helpful assistant."), which a provider could otherwise change silently.
 
-# 3. Commit, sign, and append to the registry.
-cargo run --bin tvc -- register \
-  --weights model.safetensors \
-  --model-id meta-llama/Llama-3.2-1B \
-  --version 1.0.0 \
-  --registry registry.jsonl
+The reference also records the model's wrong answers. It says the capital of Australia is Sydney, and that 4821 × 37 is 159674 (it's 178377). A reference is what the real model says, not the right answer. An endpoint selling this model that gets those right is serving something else.
 
-# 3b. For a closed model, bind the proving system's commitment under the same
-#     signature. It must be supplied now — attaching one later changes C and
-#     invalidates the signature, which is the intended behaviour.
-cargo run --bin tvc -- register \
-  --weights model.safetensors \
-  --model-id acme/closed-model \
-  --version 1.0.0 \
-  --registry registry.jsonl \
-  --proof-scheme kzg-bn254/v1 \
-  --proof-commitment <hex>
-```
+The harness that produced the run is [`reference/run_ollama_reference.py`](reference/run_ollama_reference.py). It uses the standard library only.
 
-### Verifying as a consumer
+## What a check proves, and what it doesn't
 
-```bash
-# Signature only: proves somebody signed this claim.
-cargo run --bin tvc -- verify --model-id meta-llama/Llama-3.2-1B --registry registry.jsonl
+A passing `verify-reference` means:
+- every document in the chain is signed by the key you pinned;
+- each document's bytes hash to the digest that was signed;
+- each document cites what its signed claim says it cites;
+- every run used the weights the profile names;
+- if you pass `--weights-dir`, the files on your disk are those weights, byte for byte;
+- if anchored, the profile was in the ledger before the anchored head was timestamped.
 
-# Open weights: pin the publisher and re-derive C from the weights on disk.
-cargo run --bin tvc -- verify \
-  --model-id meta-llama/Llama-3.2-1B \
-  --registry registry.jsonl \
-  --publisher <publisher public key> \
-  --weights model.safetensors
+It doesn't mean:
+- **The setup ran as described.** The engine, version and GPU are the publisher's word. What's fixed is the description, which you can re-run.
+- **The outputs came from the model.** They're what the publisher says the model said. On a pinned stack this run reproduced 12 of 12. Across GPUs and engines, greedy decoding drifts, so third-party re-runs are compared within bands, not byte for byte. A two-GPU determinism test is on the roadmap before anyone should claim more.
+- **The Bitcoin block is real.** `verify-anchor` reads the proof and prints the block height and the merkle root it claims. It doesn't fetch blocks. You finish the check on any block explorer.
+- **The key is SPOT's.** A key is 32 bytes. Pin it from somewhere you already trust.
 
-# Closed weights: no weights to check, so report the circuit identity a proof
-# would have to be verified against.
-cargo run --bin tvc -- verify \
-  --model-id meta-llama/Llama-3.2-1B \
-  --registry registry.jsonl \
-  --publisher <publisher public key> \
-  --zk
+## Why Bitcoin
 
-# Re-derive every digest in the ledger and print its head.
-cargo run --bin tvc -- audit --registry registry.jsonl
-```
+The only thing the timestamp is for is the fourth question: did SPOT change its reference after seeing a provider's output. Signatures and hashes can't answer that, because SPOT holds the key and could sign a new reference with any date it likes. It takes a party SPOT doesn't control to say "this existed by then". OpenTimestamps puts the commitment in a Bitcoin block for free, with no account. Sigstore's Rekor log would also work, and the `Anchor` trait in `tvc-cli/src/anchor.rs` is where it would go.
 
-Every verification failure exits non-zero with a message naming what failed, so this works in a build gate.
+The upgrade from "pending" to "in a block" takes a few hours. `tvc verify-anchor` asks the calendar for it and stores it when it's ready. The tool only contacts calendars on the reference client's default list, over HTTPS, because the URL comes out of a file.
 
-### Anchoring the ledger head
+## How it fits with secure-hardware inference
 
-`verify_chain` catches an edited, reordered, or deleted record. It cannot catch a *shorter* one: truncating the ledger yields a shorter but internally valid history, caught only by a consumer who already holds an earlier head — see [Threat model](#threat-model). An anchor is how that earlier head stops being something a human has to personally remember.
+Confidential-inference providers run models inside Intel TDX or AMD SEV enclaves and publish attestations. [awesome-private-inference](https://github.com/amiller/awesome-private-inference) re-checks them daily. Its findings are the clearest case for W-TVC: the weak point is "which model". For Chutes, "`model_name`/`revision` are never bound to the quote". For RedPill/Phala, model-weight provenance is listed as unknown. Tinfoil pins weights by a dm-verity root hash, and NEAR pins a Hugging Face revision.
 
-```bash
-# Submit the current ledger head to the public OpenTimestamps calendar
-# network and store the result beside the ledger, as registry.head.ots.
-cargo run --bin tvc -- anchor --registry registry.jsonl
+W-TVC isn't an enclave and doesn't replace one. It does two things those systems don't:
+- It gives "which weights" a publisher-signed, provider-independent name that an attestation could cite.
+- It applies the same discipline to the checker. If SPOT one day runs its references inside an attested GPU with the weights measured, the records stay the same, and the reference outputs become evidence instead of a statement.
 
-# Read that proof back and report what it currently establishes. Offline:
-# no network call happens here.
-cargo run --bin tvc -- verify-anchor --registry registry.jsonl
-```
+## How we got here
 
-`tvc verify-anchor` reports exactly one of three things, and no more:
+This repository changed direction twice, and the history is in `git log`.
 
-| What the proof shows | What that means |
+In week 1 (14 to 16 September) it was a Groth16 ceremony meant to prove which model served each inference, published over Nostr. That can't scale: verifying a SHA-256 Merkle root of the weights inside a circuit costs roughly 5×10¹³ constraints for a billion parameters. So it was deleted.
+
+In week 2 (18 September) it became a registry. A publisher signs a 32-byte commitment to quantised weights, recorded in a hash-chained ledger. Reading our own README, we found it promised to catch API model swaps while requiring the verifier to hold the weights. That gap led to the dual commitment. That work is still here and still tested. It's documented in [`docs/weight-commitment.md`](docs/weight-commitment.md).
+
+Week 3 turned it around. The party that most needs to prove what it ran is the checker, so W-TVC now publishes SPOT's references. The quantised commitment isn't used for that: a file manifest answers "which files" for any model size.
+
+## What's next
+
+Roughly in order:
+
+1. SPOT's reference harness emits these documents directly, with bands keyed by catalogue check id (PW-01, ID-06, BH-01 and so on).
+2. A two-GPU determinism test on reference outputs before claiming third parties can reproduce them. Then a second, quantised fingerprint for logprobs, so ID-01 and QZ-01 bands survive cross-GPU noise.
+3. Fiat-Shamir item selection in the check runner, so which committed prompts a check uses is derived from the commitment, the endpoint and the date. `tvc sample` already does the derivation.
+4. Check results in the ledger, signed by the analyst. They'll most likely be recorded as raw signal values with the verdict on top, so a wrong call can be corrected without rewriting history.
+5. Key management: an org key, analyst keys, key rotation records, and the public key published on authenticated.si.
+6. References run inside a confidential GPU with the weights measured.
+
+## Commands
+
+| Command | What it does |
 |---|---|
-| **Pending**, naming a calendar URI | A calendar has recorded the commitment. This is the calendar operator's word, nothing more — it becomes independently checkable once upgraded to a Bitcoin attestation. |
-| **Attested to Bitcoin block `N`** | The proof *claims* block `N` commits to this head. This build has not checked that claim against an actual block header — doing so needs an external Bitcoin data source, which is not implemented here (see [Roadmap](#roadmap)). Treat this as a lead to check against a block explorer, not a settled fact. |
-| A digest mismatch | The stored proof commits to a different head than the ledger currently has. `verify-anchor` exits non-zero rather than reporting a status for the wrong ledger. |
+| `manifest` | Hash every file in a model directory into a weights manifest. |
+| `verify-dir` | Check that a directory holds exactly the files a manifest lists. |
+| `check-hf` | Compare a manifest with Hugging Face at its pinned commit. |
+| `commit-items` | Commit to a JSONL file of secret items (prompts or outputs) with fresh salts. |
+| `reveal`, `verify-reveal` | Open one committed item with its proof, and check it. |
+| `sample` | Pick items from a committed set in a way nobody can steer. |
+| `publish`, `show` | Sign a document into the ledger, and print one back. |
+| `verify-reference` | Check a profile and everything it cites, check by check. |
+| `anchor`, `verify-anchor` | Timestamp the ledger head, and follow the proof to a Bitcoin block. |
+| `audit` | Re-derive every digest in the ledger and list its records. |
+| `demo` | All of the above, offline, with the cheating attempts at the end. |
+| `keygen`, `commit`, `register`, `get`, `verify` | The earlier weight-commitment flow; see `docs/weight-commitment.md`. |
 
-`NullAnchor`, the implementation the test suite uses, calls no calendar at all and can only ever report that nothing was asked.
-
----
-
-## Architecture
-
-```
-  model.safetensors
-         │
-         ▼
-  ┌──────────────┐   quantise to fixed point, map into BN254's scalar field
-  │ commitment   │
-  │  scheme      │   VectorCommitment over a bare [FieldElement]
-  │  layer       │   → scheme commitment (merkle root + length)
-  │  ─────────   │
-  │  protocol    │   bind scheme ‖ scheme_commitment ‖ length
-  │  layer       │        ‖ fractional_bits ‖ manifest_digest
-  └──────┬───────┘
-         │  C  (32 bytes, always — it is a tagged hash)
-         ▼
-  ┌──────────────┐   payload = (model_id, version, C, timestamp)
-  │ signer       │   BIP-340 Schnorr over secp256k1
-  └──────┬───────┘
-         │  (payload, signature, publisher pubkey)
-         ▼
-  ┌──────────────┐   append-only JSON Lines, one record per line
-  │ registry     │   each record digests the one before it
-  └──────────────┘
-```
-
-| Module | Role |
-|---|---|
-| `tvc-core/src/commitment.rs` | Weight loading, quantisation, `C = Commit(W)`, Merkle openings. |
-| `tvc-core/src/signer.rs` | Publisher keypairs, registration payload, BIP-340 attestations. |
-| `tvc-core/src/registry.rs` | The append-only, hash-chained public ledger. |
-| `tvc-core/src/digest.rs` | BIP-340 tagged hashing and domain separation. |
-| `tvc-core/src/hex.rs` | Strict lowercase hex codec used on every boundary. |
-| `tvc-core/src/error.rs` | The error taxonomy. |
-| `tvc-cli/src/main.rs` | The `tvc` command line; the only place randomness and secrets enter. |
-| `tvc-cli/src/anchor.rs` | Submits the ledger head to a public OpenTimestamps calendar over HTTPS, and reports what a stored proof establishes without any further network call. |
-
-### Why the commitment is split into two layers
-
-`VectorCommitment` commits to a bare `&[FieldElement]` and knows nothing about
-tensors. The protocol binding — scheme tag, element count, quantisation scale,
-tensor manifest — lives above it in `WeightCommitment`.
-
-The payoff is that **`C` is always 32 bytes whatever the scheme**, because it is
-always a tagged hash *over* the scheme's commitment rather than the scheme's
-commitment itself. A KZG or Pedersen backend has a group element where the Merkle
-root is, and `signer.rs` and `registry.rs` never notice. The tensor manifest also
-correctly leaves the trait: a polynomial commitment has no notion of a tensor.
-
-### Why the commitment is a three-stage pipeline
-
-```
-  tensors ──quantise──> field vector ──commit──> scheme commitment ──bind──> C
-```
-
-**Quantise** throws away what must not matter. Committing to `f32` bit patterns would make the commitment hostage to them: `-0.0` and `0.0` are the same weight but different bytes, as are two NaN payloads. Fixed-point integers are also the representation an arithmetic circuit will want later, which is why the weight vector lives in BN254's scalar field — the commitment made today is over the same vector a circuit will read tomorrow.
-
-**Commit** makes the commitment *openable*. A publisher can prove `W[i] = v` against a registered `C` without shipping the model. Openings are canonical: direction comes from the index and the step count is recomputed from the committed length, so there is exactly one accepting proof of any given fact, and a path with a step inserted or removed is rejected on shape rather than hashed into some other root.
-
-**Bind** closes the gaps the root alone leaves. `C` is a tagged hash over the tree root *plus* the element count, the fractional-bit scale, and a digest of the tensor manifest. Without the manifest, a `[2, 3]` tensor and a `[3, 2]` tensor holding the same numbers would commit identically.
-
-Tensors are concatenated in **lexicographic name order**, not file order — file order is an artefact of whatever wrote the checkpoint, so sorting is what lets two honest publishers of the same model reach the same `C`.
-
-### Why BIP-340 Schnorr rather than ECDSA
-
-Three reasons, in order of weight:
-
-- **Non-malleable.** ECDSA admits a second valid signature for the same message and key by negating `s`. In an append-only registry that means one attestation can be republished as two distinct-looking records.
-- **Canonical 64-byte encoding.** ECDSA's DER is a parsing minefield with a long history of signature-mutation bugs.
-- **Linear.** A consortium of labs can later co-sign one registration as a single aggregate key with no change to what a verifier does.
-
-### Why a hash-chained flat file rather than SQLite
-
-Append-only is a *policy* that no filesystem enforces. A line-delimited file has no in-place update operation, so the ordinary way to change history is to rewrite the file — a visible act — rather than `UPDATE ... WHERE`, an invisible one. It also diffs, greps, tails and replicates with tools an auditor already has.
-
-Each record carries the digest of the record before it. Editing, reordering or deleting any record changes every digest after it, and `verify_chain` reports the exact line where the divergence starts. This does not make tampering impossible — a determined editor can recompute the whole chain. It makes tampering **detectable by anyone who saw an earlier head**, which is what turns a file into a ledger.
-
-SQLite is the right answer once this registry serves concurrent writers. It is the wrong answer today: it would put a mutable B-tree under an append-only claim.
-
-Until then a second writer is **refused rather than tolerated**. An exclusive advisory lock serialises the append, and under that lock the file's length is compared against what the handle last read. The length check is the part that matters: a record's sequence number and `previous` digest come from state read earlier, so the lock alone would not help — two processes can each read a ledger of N records, queue on the lock, and both append at sequence N. Six concurrent `tvc register` processes against one ledger produce two successes and four clean failures, not six lines and a forked chain.
-
----
-
-## What is real, and what is scaffolding
-
-Honesty about scope is load-bearing for a protocol that asks to be trusted.
-
-**Real, and exercised by the test suite.**
-
-- BIP-340 Schnorr signing and verification over secp256k1.
-- Tagged, length-prefixed, domain-separated hashing, checked against the BIP-340 reference construction.
-- safetensors parsing with full range validation — truncated files, oversized header lengths, and shapes that disagree with their byte ranges are all rejected rather than read short.
-- Deterministic fixed-point quantisation into the BN254 scalar field, including the negative-value mapping and the `2^53` exact-integer bound.
-- The SHA-256 Merkle vector commitment and its canonical openings, including rejection of an opening moved to another index, shortened, or padded with an extra step.
-- The ledger's hash chain, including detection of edited, deleted and reordered records, of an unknown format version, and of an append from a stale handle.
-
-**Scaffolding, with a documented upgrade path.**
-
-- `MerkleVectorCommitment` is a hash-based vector commitment, not a succinct one. Openings are `O(log n)` rather than constant-size. `VectorCommitment` is the seam where KZG or Pedersen goes; nothing outside `commitment.rs` sees a tree.
-- The tree hash is SHA-256, which is bitwise and costs tens of thousands of constraints per compression to verify inside an arithmetic circuit. The BN254 field encoding means the vector needs no re-encoding when a circuit arrives; it does not by itself make anything circuit-efficient. A field-native hash (Poseidon) is the change that would, and it is deferred until the proving system is chosen.
-- The tree is held in memory, so this phase targets models in the tens of millions of parameters. `MerkleProver` keeps the levels so repeated openings are `O(log n)`, but streaming and memory-mapped trees are what lift the ceiling — and they change no interface here.
-- **ONNX ingestion is not implemented.** `Tensor` is the interface a loader produces, and only safetensors has one today. ONNX is protobuf, and a protobuf parser is a dependency this phase deliberately does not take.
-- The registry is a local file. Replication, and publishing the head digest somewhere a consumer can independently see it, are out of scope for this phase.
-- Single-writer is the supported mode. Concurrent writers are detected and refused, not merged.
-
-**Not in this repository at all.** The arithmetic circuit and the proving system.
-
----
-
-## Threat model
-
-**What a registration establishes.** One lab, holding one key, asserted that a named model version has weight commitment `C` at a claimed time. The registry refuses to store an attestation whose signature does not verify, so every record in a well-formed ledger is signed by the key it names.
-
-**What it does not establish.**
-
-- **Name ownership.** Two publishers can register the same `model_id` under different keys, exactly as two people can claim a username on two different servers. A registry cannot adjudicate this. Consumers resolve it by *pinning a key* — `verify_model_registration_by` — not by trusting the registry's ordering. There is an integration test asserting that a bare signature check passes for a rival's registration, because that is precisely why a bare check is not enough.
-- **Weight quality.** `C` says which weights, not whether they are any good.
-- **That a served inference used the committed weights.** This is the closed-weights gap and it is not closed here. `proof_commitment` is the hook for it; the circuit that would use it does not exist in this tree.
-- **Timestamps.** The registry has no way to check a publisher's clock and does not pretend to. The timestamp is part of what was signed, so it is exactly as trustworthy as the key that signed it.
-- **Rollback.** Truncating the ledger yields a shorter but internally valid history. This is caught by holding an earlier head, not by the chain itself — there is a test pinning that limitation in place. `tvc anchor` (see [Anchoring the ledger head](#anchoring-the-ledger-head)) is how that earlier head stops depending on a human's memory, once the calendar's commitment is upgraded to a Bitcoin attestation.
-- **Anything in a ledger line this build does not recognise.** Unknown JSON fields are ignored so that a record written by a later version still opens here, and they are covered by neither the digest nor the signature. They are inert by construction and nothing should read them. An unknown *format version*, by contrast, is a hard stop: a reader that cannot reproduce a digest cannot honestly call the record verified.
-
-**The bound quantisation puts on the claim.** Rounding to a fixed scale means two *different* models commit to the same `C` if they differ by less than half a step. At the default of 16 fractional bits the step is `2^-16 ≈ 1.5e-5`.
-
-This cuts both ways, and the direction is easy to get backwards. The step is far **finer** than `bf16` precision (ULP ≈ `7.8e-3` near 1.0), so quantisation does **not** make `C` stable across dtype re-encoding — an `f32` checkpoint re-saved as `bf16` moves by hundreds of steps and commits to a different `C`. What the scale absorbs is only sub-step noise, such as the last-bit differences between two equivalent `f32` computations.
-
-Whether that is right depends on what you want `C` to name. Committing to the weights *as stored* is the defensible default — a `bf16` copy is a different artefact — but a publisher shipping the same model in several dtypes must register each one. The scale is committed inside `C`, so a verifier can always see which claim was made.
-
----
-
-## Dependencies
-
-Six crates, each load-bearing:
-
-| Crate | Why |
-|---|---|
-| `secp256k1`, `bitcoin_hashes` | Consensus-grade primitives; hand-rolling either would be reckless. |
-| `zeroize` | Signing keys must not linger in freed memory. |
-| `serde`, `serde_json` | The ledger and the safetensors header are both JSON read back from untrusted disk. A parser on that boundary is exactly what should not be homegrown. |
-| `fs2` | Advisory file locking. A sidecar lockfile is orphaned by a crash or a `SIGKILL` and then needs deleting by hand; an OS lock lives on the file descriptor and the kernel releases it however the process dies. Raw `flock` is not an option because `tvc-core` forbids unsafe code. |
-
-Hex stays in-tree (`tvc_core::hex`): forty auditable lines, and every digest a verifier acts on passes through it. The CLI adds `clap`, `getrandom`, and `ureq` — a blocking HTTPS client, used only by `tvc anchor` to submit the ledger head to a public calendar. Parsing the calendar's response back is hand-written in `tvc-cli/src/anchor.rs` rather than pulled in as a dependency; see that module's doc comment for why.
-
----
+The record formats, the canonical JSON rules, the item leaf and the signing domains are in [`docs/spec.md`](docs/spec.md).
 
 ## Repository layout
 
 ```
-.
-├── Cargo.toml                       workspace, dependency policy
-├── tvc-core/
-│   ├── src/
-│   │   ├── lib.rs                   crate docs, end-to-end doctest
-│   │   ├── commitment.rs            weight loading, quantisation, C = Commit(W)
-│   │   ├── signer.rs                publisher keys, payload, BIP-340 attestations
-│   │   ├── registry.rs              append-only hash-chained ledger
-│   │   ├── digest.rs                tagged hashing, domain separation
-│   │   ├── hex.rs                   strict lowercase hex codec
-│   │   └── error.rs                 error taxonomy
-│   ├── examples/register_model.rs   end-to-end walkthrough as library calls
-│   └── tests/end_to_end.rs          integration tests
-├── tvc-cli/src/
-│   ├── main.rs                      the `tvc` binary
-│   └── anchor.rs                    OpenTimestamps calendar anchoring
-├── .env.example                     TVC_SECRET_KEY template
-└── LICENSE
+tvc-core/src/
+  canonical.rs     canonical JSON and content digests
+  manifest.rs      per-file weight manifests
+  itemset.rs       salted item commitments, reveals, Fiat-Shamir selection
+  documents.rs     the four reference kinds, and the object store
+  registry.rs      the append-only ledger (model registrations v2, documents v3)
+  signer.rs        BIP-340 keys, registrations, document claims
+  commitment.rs    the quantised weight commitment and its Merkle tree
+  digest.rs, hex.rs, error.rs
+tvc-cli/src/
+  main.rs          the tvc binary
+  reference.rs     manifest, publish, reveal and verify-reference commands
+  hf.rs            the Hugging Face comparison
+  anchor.rs        OpenTimestamps submission, parsing and upgrade
+reference/         a real ledger for Qwen2.5-0.5B-Instruct, and its harness
+docs/              spec, verify-yourself walkthrough, demo script, earlier README
 ```
 
----
+## Dependencies
 
-## Key handling
+Each one is justified in prose in the workspace `Cargo.toml`. `tvc-core` uses:
+- `secp256k1` and `bitcoin_hashes` for signatures and hashes;
+- `zeroize` for key hygiene;
+- `serde` and `serde_json` for every JSON boundary;
+- `fs2` for the ledger lock.
 
-`tvc-core` has no entropy source and no environment access by design. The CLI is the one place both appear, so the trust boundary is a file you can read rather than a library default you have to take on faith.
+The CLI adds:
+- `clap`, `getrandom`;
+- `ureq` for the calendar and Hugging Face over HTTPS;
+- `bitcoin_hashes` directly, for SHA-1 and RIPEMD-160 on proof paths.
 
-- Randomness comes from the operating system via `getrandom`, for key generation and for BIP-340 auxiliary randomness.
-- The signing key is read from `TVC_SECRET_KEY`, never from a flag. Command-line arguments are visible in `ps` output and land in shell history; an environment variable is merely bad rather than broadcast.
-- `PublisherKeypair` holds its scalar in a `Zeroizing` buffer, is not `Clone`, is not serialisable, and its `Debug` prints `<redacted>`. The only way out is `expose_secret_hex`, whose name is the warning.
-
----
-
-## Roadmap
-
-1. **This phase — setup and registry.** Weight commitments, publisher attestations, append-only ledger. Done.
-2. **Openings at scale.** Swap `MerkleVectorCommitment` for KZG behind the existing `VectorCommitment` trait, for constant-size and circuit-friendly openings.
-3. **Scale.** Streaming leaf construction and a memory-mapped tree, to lift the in-memory ceiling past tens of millions of parameters.
-4. **ONNX ingestion.** A second loader producing `Tensor`, so the commitment scheme is unchanged.
-5. **Circuit registration.** Register the arithmetic circuit for a model alongside its weights, committing to the relation as well as the parameters. Choosing the proving system here is what fills `proof_commitment` with something real rather than a caller-supplied blob.
-6. **Runtime proofs.** Prove an inference was served by the committed weights — the step that closes the closed-weights gap. Requires 5, and requires the quantisation scale to match the inference arithmetic.
-7. **Distribution.** Replicate the ledger, so no single copy is authoritative. The head-anchoring half of this is partly done — `tvc anchor` submits the head to the public OpenTimestamps calendar network, see [Anchoring the ledger head](#anchoring-the-ledger-head) — but independently checking the resulting Bitcoin attestation against a real block header is not, and needs an external chain data source this crate does not have.
-
----
+The minimum Rust version is 1.85, which the locked `clap` requires. `tvc-core` keeps `unsafe_code = "forbid"` and `missing_docs = "deny"`.
 
 ## License
 

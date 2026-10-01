@@ -759,7 +759,7 @@ pub trait VectorCommitment {
     /// The scheme's failure type.
     type Error: std::error::Error + Send + Sync + 'static;
 
-    /// Identifier recorded in [`WeightCommitment::scheme`].
+    /// Identifier recorded in [`SchemeCommitment::scheme`].
     fn scheme() -> &'static str;
 
     /// Canonical bytes of a commitment, for binding into [`WeightCommitment`].

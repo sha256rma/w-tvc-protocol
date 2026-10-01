@@ -1,0 +1,22 @@
+{
+  "count": 12,
+  "index": 6,
+  "item": {
+    "check": "ID-03",
+    "id": 6,
+    "messages": [
+      {
+        "content": "What is the capital of Australia? Answer with one word.",
+        "role": "user"
+      }
+    ]
+  },
+  "kind": "item-reveal/v1",
+  "salt": "6fcaece84e60070c0f4c5bceb689c3b85823305adba7614ee758a6ca9565d49d",
+  "siblings": [
+    "af441cd40a276410ba02a2f96b0f63dcb138cb0cf4107ba92b4d29566c2aabbe",
+    "0757af94dd02864d9a43197375bb9c96adb90a7abebba5bf1aff05c5802a34b8",
+    "a36ad6c01dcc654591276e116e6c1c1effcd7cb4883d31803dc4c40fe4067ae1",
+    "b4e3fbe2f408d47ebe7196598f80032522732c4db95c4f80a4bae66793eaf3d9"
+  ]
+}

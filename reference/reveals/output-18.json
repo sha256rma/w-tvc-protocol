@@ -1,0 +1,22 @@
+{
+  "count": 36,
+  "index": 18,
+  "item": {
+    "done_reason": "stop",
+    "eval_count": 4,
+    "id": 6,
+    "prompt_eval_count": 41,
+    "response": "Sydney.",
+    "sample": 0
+  },
+  "kind": "item-reveal/v1",
+  "salt": "9192b958b6b4b9f62d7452cda9807a6af3146def18af7d6841bef16f88a25eae",
+  "siblings": [
+    "3ab5d5ef2d726c1ea817d1cba4d0e4dd3c3afb80994a84bf658ed925de6e04ca",
+    "17ccae1292d62358b39fa93757cc8ee7e657d83131fea7c5eadc5a63515f3715",
+    "0a02748d51563c4365c024e4aaa6668e7b5de9a7dfb35338ba9b298cded66606",
+    "f3f5a8e4b8a397224e116579cc70b1a761bcdc4452cea16e05e4a825399bb87a",
+    "9e6ca6cad008f6ff6351ff994cb53dc9ae9447df2e00f638d25b84580be01bb0",
+    "4b1faf97cde0508af68ea0675b056eb51007c5c4cb7994c52740b02d8700ea83"
+  ]
+}
