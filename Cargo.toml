@@ -38,7 +38,11 @@ authors = ["W-TVC Protocol Contributors"]
 #                               rather than shared here; blocking, not async,
 #                               to match how the rest of this workspace is
 #                               written, and built against rustls rather than
-#                               a system TLS library.
+#                               a system TLS library. Also used by `tvc check-hf`
+#                               to compare a weights manifest with Hugging Face.
+#   bitcoin_hashes              (shared, above) tvc-cli also uses it directly to
+#                               evaluate OpenTimestamps proof paths, which can
+#                               use SHA-1 and RIPEMD-160.
 [workspace.dependencies]
 bitcoin_hashes = { version = "1.2", default-features = false, features = ["std"] }
 secp256k1 = { version = "0.33", default-features = false, features = ["std"] }

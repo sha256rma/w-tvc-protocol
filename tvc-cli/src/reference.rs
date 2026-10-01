@@ -569,7 +569,7 @@ fn check_anchor(ledger: &Path, registry: &ModelRegistry, profile: &[u8; 32], che
         return;
     }
     match OpenTimestampsCalendar::default().verify(anchored, &proof) {
-        Ok(AnchorStatus::BitcoinAttested { height }) => check.pass(format!(
+        Ok(AnchorStatus::BitcoinAttested { height, .. }) => check.pass(format!(
             "covered by a proof claiming Bitcoin block {height} (check it with tvc verify-anchor)"
         )),
         Ok(AnchorStatus::Pending { .. }) => check.pass(

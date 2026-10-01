@@ -21,6 +21,9 @@ serde_json.workspace = true
 # `tvc anchor` submits the ledger head to a public calendar over HTTPS; see
 # the dependency policy note in the workspace Cargo.toml.
 ureq = { version = "2.12", default-features = false, features = ["tls"] }
+# Evaluating an OpenTimestamps proof path needs SHA-1 and RIPEMD-160 as well as
+# SHA-256. Same crate tvc-core already uses; no new dependency in the tree.
+bitcoin_hashes.workspace = true
 
 [lints.rust]
 unsafe_code = "forbid"

@@ -34,7 +34,7 @@ use tvc_core::registry::{ModelRegistry, GENESIS_DIGEST};
 use tvc_core::signer::{unix_now, PublisherKeypair, RegistrationPayload};
 use tvc_core::{hex, PROTOCOL_VERSION};
 
-use anchor::{Anchor, AnchorProof, AnchorStatus, OpenTimestampsCalendar};
+use anchor::{Anchor, AnchorProof, AnchorStatus, NullAnchor, OpenTimestampsCalendar};
 
 /// Environment variable holding the publisher's 32-byte signing key, as hex.
 const SECRET_KEY_VAR: &str = "TVC_SECRET_KEY";
@@ -139,11 +139,14 @@ enum Command {
         registry: PathBuf,
     },
 
-    /// Check a stored anchor proof against the ledger head.
+    /// Check a stored anchor proof, and ask the calendar for an upgrade.
     VerifyAnchor {
         /// Path to the registry ledger.
         #[arg(long, default_value = "registry.jsonl")]
         registry: PathBuf,
+        /// Only read the stored proof; do not contact any calendar.
+        #[arg(long)]
+        offline: bool,
     },
 
     /// Hash every file in a model directory into a weights manifest.
@@ -355,7 +358,7 @@ fn main() -> ExitCode {
         ),
         Command::Audit { registry } => audit(&registry),
         Command::Anchor { registry } => anchor_ledger(&registry),
-        Command::VerifyAnchor { registry } => verify_anchor(&registry),
+        Command::VerifyAnchor { registry, offline } => verify_anchor(&registry, offline),
         Command::Manifest {
             dir,
             model,
@@ -649,27 +652,75 @@ fn anchor_ledger(ledger: &Path) -> Result<(), String> {
     println!("  head               {}", hex::encode(&head));
     println!("  proof              {}", proof_path.display());
     println!();
-    println!("A calendar has recorded this commitment. That is a promise from the calendar");
-    println!("operator, not yet an independently checkable fact: it becomes one once the");
-    println!("commitment is folded into a Bitcoin block. Run `tvc verify-anchor` later to");
-    println!("check on that.");
+    println!("A calendar has recorded this commitment. Until it is folded into a Bitcoin");
+    println!("block (usually a few hours), that is the calendar operator's word only.");
+    println!("`tvc verify-anchor` asks the calendar for the upgraded proof and stores it");
+    println!("once it exists.");
     Ok(())
 }
 
-fn verify_anchor(ledger: &Path) -> Result<(), String> {
-    let registry = ModelRegistry::open(ledger).map_err(describe)?;
-    let head = registry.head();
-    let proof_path = anchor_proof_path(ledger);
+/// Every record's (sequence, digest) in ledger order.
+fn record_digests(registry: &ModelRegistry) -> Vec<(u64, [u8; 32])> {
+    let mut all: Vec<(u64, [u8; 32])> = registry
+        .records()
+        .iter()
+        .map(|r| (r.sequence, r.digest))
+        .chain(registry.documents().iter().map(|r| (r.sequence, r.digest)))
+        .collect();
+    all.sort();
+    all
+}
 
-    let proof = AnchorProof::from_file(&proof_path)
+fn verify_anchor(ledger: &Path, offline: bool) -> Result<(), String> {
+    let registry = ModelRegistry::open(ledger).map_err(describe)?;
+    let proof_path = anchor_proof_path(ledger);
+    let mut proof = AnchorProof::from_file(&proof_path)
         .map_err(|error| format!("no anchor proof to verify: {error}"))?;
-    let status = OpenTimestampsCalendar::default().verify(head, &proof)?;
+
+    // The proof may cover an earlier head than today's: the ledger can grow
+    // after it was anchored. Say exactly how much of it the proof covers.
+    let anchored = proof.committed_digest()?;
+    let digests = record_digests(&registry);
+    let covered = digests
+        .iter()
+        .find(|(_, digest)| digest == &anchored)
+        .map(|(sequence, _)| *sequence)
+        .ok_or_else(|| {
+            format!(
+                "anchor mismatch: the proof commits to {}, which is not a record in this ledger",
+                hex::encode(&anchored)
+            )
+        })?;
+
+    let calendar = OpenTimestampsCalendar::default();
+    let mut status = if proof.is_null() {
+        NullAnchor.verify(anchored, &proof)?
+    } else {
+        calendar.verify(anchored, &proof)?
+    };
+    let mut upgraded = false;
+    if matches!(status, AnchorStatus::Pending { .. }) && !offline {
+        if let Some(better) = calendar.upgrade(anchored, &proof)? {
+            better.to_file(&proof_path)?;
+            proof = better;
+            status = calendar.verify(anchored, &proof)?;
+            upgraded = true;
+        }
+    }
 
     println!("  ledger             {}", ledger.display());
-    println!("  head               {}", hex::encode(&head));
+    println!("  anchored head      {}", hex::encode(&anchored));
+    println!("  covers records     0 to {covered} of {}", registry.len());
+    if (covered as usize) + 1 < registry.len() {
+        println!(
+            "                     records {} to {} came later and are not covered; run tvc anchor again",
+            covered + 1,
+            registry.len() - 1
+        );
+    }
     match status {
         AnchorStatus::Unattested => {
-            println!("  status             not attested (offline anchor)");
+            println!("  status             offline anchor only; no outside party has seen this head");
         }
         AnchorStatus::Pending { calendars } => {
             println!("  status             pending");
@@ -677,14 +728,26 @@ fn verify_anchor(ledger: &Path) -> Result<(), String> {
                 println!("  calendar           {calendar}");
             }
             println!();
-            println!("note: recorded by a calendar, not yet folded into a Bitcoin block.");
+            if offline {
+                println!("note: --offline, so the calendars were not asked for an upgrade.");
+            } else {
+                println!("note: the calendars have not folded it into a Bitcoin block yet. Try again later.");
+            }
         }
-        AnchorStatus::BitcoinAttested { height } => {
+        AnchorStatus::BitcoinAttested {
+            height,
+            merkle_root,
+        } => {
+            let display: Vec<u8> = merkle_root.iter().rev().copied().collect();
             println!("  status             attested to Bitcoin block {height}");
+            println!("  merkle root        {}", hex::encode(&display));
+            if upgraded {
+                println!("                     (upgraded just now; {} rewritten)", proof_path.display());
+            }
             println!();
-            println!("note: this is what the proof claims, not something this build has checked");
-            println!("      against an actual block header. Confirming it needs an external");
-            println!("      Bitcoin data source, which this build does not have.");
+            println!("This build does not fetch Bitcoin blocks. To finish the check, open block");
+            println!("{height} on any block explorer and compare its merkle root with the value above.");
+            println!("If they match, the anchored head existed no later than that block's time.");
         }
     }
     Ok(())

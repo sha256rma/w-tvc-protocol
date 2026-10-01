@@ -67,6 +67,7 @@ use std::io::Read;
 use std::path::Path;
 use std::time::Duration;
 
+use bitcoin_hashes::{ripemd160, sha1};
 use tvc_core::hex;
 
 /// Result type for this module.
@@ -185,6 +186,9 @@ pub enum AnchorStatus {
     BitcoinAttested {
         /// Block height the proof claims, as reported by the calendar.
         height: u64,
+        /// The merkle root the proof says that block commits to, in the byte
+        /// order a block header stores it. Block explorers print it reversed.
+        merkle_root: Vec<u8>,
     },
 }
 
@@ -345,7 +349,7 @@ impl Anchor for OpenTimestampsCalendar {
                 hex::encode(&head)
             ));
         }
-        status_of(&parsed.attestations)
+        status_of(&parsed.found)
     }
 }
 
@@ -382,10 +386,105 @@ enum ParsedAttestation {
     Other([u8; 8]),
 }
 
+/// One operation on the path from the anchored digest to an attestation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Op {
+    /// A hash, `reverse`, or `hexlify`: the tag is the whole operation.
+    Unary(u8),
+    Append(Vec<u8>),
+    Prepend(Vec<u8>),
+}
+
+/// Largest message an operation may take or produce, from the reference
+/// implementation's `Op.MAX_MSG_LENGTH`. Keeps a hostile proof from growing
+/// a message without bound.
+const MAX_MSG_LEN: usize = 4096;
+
+impl Op {
+    fn read(cursor: &mut Cursor, tag: u8) -> Result<Self> {
+        match tag {
+            OP_SHA1 | OP_RIPEMD160 | OP_SHA256 | OP_KECCAK256 | OP_REVERSE | OP_HEXLIFY => {
+                Ok(Self::Unary(tag))
+            }
+            OP_APPEND => Ok(Self::Append(cursor.read_varbytes(MAX_MSG_LEN)?.to_vec())),
+            OP_PREPEND => Ok(Self::Prepend(cursor.read_varbytes(MAX_MSG_LEN)?.to_vec())),
+            other => Err(format!(
+                "unrecognised timestamp operation tag 0x{other:02x}; cannot continue walking the proof"
+            )),
+        }
+    }
+
+    /// Computes what this operation turns `msg` into.
+    fn apply(&self, msg: &[u8]) -> Result<Vec<u8>> {
+        if msg.len() > MAX_MSG_LEN {
+            return Err("message on the proof path is too long".to_owned());
+        }
+        let result = match self {
+            Self::Append(arg) => [msg, arg].concat(),
+            Self::Prepend(arg) => [arg.as_slice(), msg].concat(),
+            Self::Unary(OP_SHA256) => tvc_core::canonical::sha256_bytes(msg).to_vec(),
+            Self::Unary(OP_SHA1) => sha1::Hash::hash(msg).to_byte_array().to_vec(),
+            Self::Unary(OP_RIPEMD160) => ripemd160::Hash::hash(msg).to_byte_array().to_vec(),
+            Self::Unary(OP_REVERSE) | Self::Unary(OP_HEXLIFY) if msg.is_empty() => {
+                return Err("reverse or hexlify of an empty message".to_owned())
+            }
+            Self::Unary(OP_REVERSE) => msg.iter().rev().copied().collect(),
+            Self::Unary(OP_HEXLIFY) => hex::encode(msg).into_bytes(),
+            Self::Unary(OP_KECCAK256) => {
+                return Err(
+                    "keccak256 appears on this proof path; it is only used by Ethereum calendars, which this build does not follow"
+                        .to_owned(),
+                )
+            }
+            Self::Unary(other) => return Err(format!("unrecognised operation 0x{other:02x}")),
+        };
+        if result.len() > MAX_MSG_LEN {
+            return Err("message on the proof path is too long".to_owned());
+        }
+        Ok(result)
+    }
+
+    fn serialize(&self, out: &mut Vec<u8>) {
+        match self {
+            Self::Unary(tag) => out.push(*tag),
+            Self::Append(arg) | Self::Prepend(arg) => {
+                out.push(if matches!(self, Self::Append(_)) { OP_APPEND } else { OP_PREPEND });
+                write_varuint(out, arg.len() as u64);
+                out.extend_from_slice(arg);
+            }
+        }
+    }
+}
+
+fn write_varuint(out: &mut Vec<u8>, mut value: u64) {
+    loop {
+        let mut byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if value != 0 {
+            byte |= 0x80;
+        }
+        out.push(byte);
+        if value == 0 {
+            break;
+        }
+    }
+}
+
+/// An attestation with the message it attests and the operations leading to it.
+#[derive(Debug, Clone)]
+struct Found {
+    attestation: ParsedAttestation,
+    /// The message at the attested node. For a Bitcoin attestation this is the
+    /// block's merkle root, in the byte order the header stores it.
+    msg: Vec<u8>,
+    /// Operations from the anchored digest down to this node.
+    path: Vec<Op>,
+}
+
 /// A `DetachedTimestampFile`, reduced to what this module reports on.
 struct ParsedProof {
     digest: [u8; 32],
-    attestations: Vec<ParsedAttestation>,
+    found: Vec<Found>,
 }
 
 /// Turns the attestations found in a proof into the status this module is
@@ -398,20 +497,20 @@ struct ParsedProof {
 /// case is reported as an error rather than silently folded into
 /// [`AnchorStatus::Unattested`], which means something different for
 /// [`NullAnchor`].
-fn status_of(attestations: &[ParsedAttestation]) -> Result<AnchorStatus> {
-    if let Some(height) = attestations
-        .iter()
-        .find_map(|attestation| match attestation {
-            ParsedAttestation::Bitcoin(height) => Some(*height),
-            _ => None,
-        })
-    {
-        return Ok(AnchorStatus::BitcoinAttested { height });
+fn status_of(found: &[Found]) -> Result<AnchorStatus> {
+    if let Some((height, msg)) = found.iter().find_map(|f| match f.attestation {
+        ParsedAttestation::Bitcoin(height) => Some((height, f.msg.clone())),
+        _ => None,
+    }) {
+        return Ok(AnchorStatus::BitcoinAttested {
+            height,
+            merkle_root: msg,
+        });
     }
 
-    let calendars: Vec<String> = attestations
+    let calendars: Vec<String> = found
         .iter()
-        .filter_map(|attestation| match attestation {
+        .filter_map(|f| match &f.attestation {
             ParsedAttestation::Pending(uri) => Some(uri.clone()),
             _ => None,
         })
@@ -488,16 +587,14 @@ impl<'a> Cursor<'a> {
     }
 }
 
-/// Parses a `DetachedTimestampFile` and collects every attestation reachable
-/// in its timestamp tree.
+/// Parses a `DetachedTimestampFile`, evaluating every operation, and collects
+/// each attestation with the message it attests and the path to it.
 ///
-/// This walks the op tree structurally — reading each operation's tag and,
-/// for a binary operation, its argument — without evaluating what any
-/// operation computes. That is enough to find every attestation correctly,
-/// because `TimeAttestation`'s wire format does not depend on the tree
-/// position it was found at. It is also all this module needs: nothing here
-/// checks a computed digest against a Bitcoin block header, so nothing here
-/// needs to compute one. See the module docs for what that leaves unverified.
+/// The messages are what make two things possible: asking a calendar for an
+/// upgraded proof (the calendar indexes commitments by the message at the
+/// pending node), and telling a reader which merkle root to compare against
+/// a Bitcoin block. What this does not do is fetch that block: confirming the
+/// root is in the chain is left to the reader and a block explorer.
 fn parse_proof(bytes: &[u8]) -> Result<ParsedProof> {
     let mut cursor = Cursor::new(bytes);
 
@@ -527,25 +624,26 @@ fn parse_proof(bytes: &[u8]) -> Result<ParsedProof> {
         .try_into()
         .map_err(|_| "this build only anchors 32-byte digests".to_owned())?;
 
-    let mut attestations = Vec::new();
-    collect_attestations(&mut cursor, &mut attestations, 0)?;
+    let mut found = Vec::new();
+    let mut path = Vec::new();
+    collect(&mut cursor, &digest, &mut path, &mut found, 0)?;
     if cursor.remaining() != 0 {
         return Err("trailing bytes after the timestamp tree".to_owned());
     }
 
-    Ok(ParsedProof {
-        digest,
-        attestations,
-    })
+    Ok(ParsedProof { digest, found })
 }
 
 /// Walks one `Timestamp` node: zero or more `0xff`-prefixed entries followed
 /// by exactly one unprefixed entry, each entry being either an attestation
-/// (tag `0x00`) or an operation carrying a nested `Timestamp`. Mirrors
-/// `Timestamp.deserialize` in the reference implementation.
-fn collect_attestations(
+/// (tag `0x00`) or an operation carrying a nested `Timestamp` over the
+/// operation's result. Mirrors `Timestamp.deserialize` in the reference
+/// implementation.
+fn collect(
     cursor: &mut Cursor,
-    out: &mut Vec<ParsedAttestation>,
+    msg: &[u8],
+    path: &mut Vec<Op>,
+    out: &mut Vec<Found>,
     depth: u32,
 ) -> Result<()> {
     if depth >= MAX_TREE_DEPTH {
@@ -556,9 +654,9 @@ fn collect_attestations(
         let tag = cursor.read_byte()?;
         if tag == 0xff {
             let inner = cursor.read_byte()?;
-            visit_entry(cursor, inner, out, depth)?;
+            visit_entry(cursor, inner, msg, path, out, depth)?;
         } else {
-            return visit_entry(cursor, tag, out, depth);
+            return visit_entry(cursor, tag, msg, path, out, depth);
         }
     }
 }
@@ -566,35 +664,25 @@ fn collect_attestations(
 fn visit_entry(
     cursor: &mut Cursor,
     tag: u8,
-    out: &mut Vec<ParsedAttestation>,
+    msg: &[u8],
+    path: &mut Vec<Op>,
+    out: &mut Vec<Found>,
     depth: u32,
 ) -> Result<()> {
     if tag == 0x00 {
-        out.push(parse_attestation(cursor)?);
+        out.push(Found {
+            attestation: parse_attestation(cursor)?,
+            msg: msg.to_vec(),
+            path: path.clone(),
+        });
         return Ok(());
     }
-    skip_op_argument(cursor, tag)?;
-    collect_attestations(cursor, out, depth + 1)
-}
-
-/// Consumes an operation's argument, if it has one.
-///
-/// A unary operation (a hash, `reverse`, or `hexlify`) is nothing but its
-/// tag, already consumed by the caller. A binary operation (`append` or
-/// `prepend`) carries a length-prefixed argument that must be consumed to
-/// keep the cursor aligned with the next entry, even though this module never
-/// evaluates what the operation produces.
-fn skip_op_argument(cursor: &mut Cursor, tag: u8) -> Result<()> {
-    match tag {
-        OP_SHA1 | OP_RIPEMD160 | OP_SHA256 | OP_KECCAK256 | OP_REVERSE | OP_HEXLIFY => Ok(()),
-        OP_APPEND | OP_PREPEND => {
-            cursor.read_varbytes(4096)?;
-            Ok(())
-        }
-        other => Err(format!(
-            "unrecognised timestamp operation tag 0x{other:02x}; cannot continue walking the proof"
-        )),
-    }
+    let op = Op::read(cursor, tag)?;
+    let next = op.apply(msg)?;
+    path.push(op);
+    let walked = collect(cursor, &next, path, out, depth + 1);
+    path.pop();
+    walked
 }
 
 /// Parses one `TimeAttestation`: an 8-byte tag, then a length-prefixed
@@ -624,6 +712,143 @@ fn parse_attestation(cursor: &mut Cursor) -> Result<ParsedAttestation> {
         return Err("attestation payload has trailing bytes".to_owned());
     }
     Ok(attestation)
+}
+
+/// Host suffixes of the calendars the reference client trusts by default
+/// (`opentimestamps.calendar.DEFAULT_CALENDAR_WHITELIST`).
+///
+/// A pending attestation names a URL to poll. That URL comes out of a file, so
+/// following it blindly would let a crafted proof point this tool at any
+/// address. Only these calendars, over HTTPS, are contacted.
+const CALENDAR_HOST_SUFFIXES: [&str; 3] = [
+    ".calendar.opentimestamps.org",
+    ".calendar.eternitywall.com",
+    ".calendar.catallaxy.com",
+];
+
+/// Whether a pending attestation's calendar URI is one this tool will contact.
+fn calendar_allowed(uri: &str) -> bool {
+    let Some(rest) = uri.strip_prefix("https://") else {
+        return false;
+    };
+    let host = rest.split('/').next().unwrap_or("");
+    let charset_ok = uri
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b"-._/:".contains(&b));
+    charset_ok
+        && !host.contains(':')
+        && CALENDAR_HOST_SUFFIXES
+            .iter()
+            .any(|suffix| host.ends_with(suffix) && host.len() > suffix.len())
+}
+
+/// Asks a calendar for its timestamp on `msg`. `None` means the calendar does
+/// not have an upgrade yet (HTTP 404), which is the normal answer for the
+/// first few hours.
+fn fetch_timestamp(uri: &str, msg: &[u8], timeout: Duration) -> Result<Option<Vec<u8>>> {
+    let url = format!("{}/timestamp/{}", uri.trim_end_matches('/'), hex::encode(msg));
+    let response = match ureq::get(&url)
+        .set("Accept", "application/vnd.opentimestamps.v1")
+        .timeout(timeout)
+        .call()
+    {
+        Ok(response) => response,
+        Err(ureq::Error::Status(404, _)) => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    let mut body = Vec::new();
+    response
+        .into_reader()
+        .take(CALENDAR_RESPONSE_LIMIT)
+        .read_to_end(&mut body)
+        .map_err(|error| error.to_string())?;
+    Ok(Some(body))
+}
+
+/// Builds a single-path proof: the anchored digest, the operations down to
+/// one pending node, and the calendar's timestamp from that node on.
+///
+/// Valid OpenTimestamps by construction: a node with exactly one entry is
+/// written as that entry with no `0xff` prefix, so a chain of operations is
+/// just the operations in order, followed by the subtree the calendar sent.
+fn single_path_proof(head: &[u8; 32], path: &[Op], subtree: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(HEADER_MAGIC);
+    bytes.push(MAJOR_VERSION);
+    bytes.push(OP_SHA256);
+    bytes.extend_from_slice(head);
+    for op in path {
+        op.serialize(&mut bytes);
+    }
+    bytes.extend_from_slice(subtree);
+    bytes
+}
+
+impl OpenTimestampsCalendar {
+    /// Asks the calendars in a pending proof whether the commitment has been
+    /// folded into a Bitcoin block yet, and if so returns the upgraded proof.
+    ///
+    /// Returns `Ok(None)` when the proof already carries a Bitcoin attestation
+    /// or when no calendar has one yet. Only calendars on the reference
+    /// client's default list are contacted.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message if the proof does not commit to `head`, or if every
+    /// calendar contacted failed for a reason other than "not yet".
+    pub fn upgrade(&self, head: [u8; 32], proof: &AnchorProof) -> Result<Option<AnchorProof>> {
+        let parsed = parse_proof(&proof.bytes)?;
+        if parsed.digest != head {
+            return Err(format!(
+                "anchor mismatch: proof commits to {}, ledger head is {}",
+                hex::encode(&parsed.digest),
+                hex::encode(&head)
+            ));
+        }
+        if parsed
+            .found
+            .iter()
+            .any(|f| matches!(f.attestation, ParsedAttestation::Bitcoin(_)))
+        {
+            return Ok(None);
+        }
+
+        let mut errors = Vec::new();
+        for found in &parsed.found {
+            let ParsedAttestation::Pending(uri) = &found.attestation else {
+                continue;
+            };
+            if !calendar_allowed(uri) {
+                errors.push(format!("{uri}: not a calendar this tool contacts"));
+                continue;
+            }
+            match fetch_timestamp(uri, &found.msg, self.timeout) {
+                Ok(None) => {}
+                Ok(Some(subtree)) => {
+                    let candidate = single_path_proof(&head, &found.path, &subtree);
+                    let upgraded = parse_proof(&candidate)
+                        .map_err(|error| format!("{uri}: calendar sent an unreadable timestamp: {error}"))?;
+                    if upgraded
+                        .found
+                        .iter()
+                        .any(|f| matches!(f.attestation, ParsedAttestation::Bitcoin(_)))
+                    {
+                        return Ok(Some(AnchorProof { bytes: candidate }));
+                    }
+                }
+                Err(error) => errors.push(format!("{uri}: {error}")),
+            }
+        }
+        let pending = parsed
+            .found
+            .iter()
+            .filter(|f| matches!(f.attestation, ParsedAttestation::Pending(_)))
+            .count();
+        if pending > 0 && errors.len() == pending {
+            return Err(errors.join("; "));
+        }
+        Ok(None)
+    }
 }
 
 #[cfg(test)]
@@ -696,20 +921,6 @@ mod tests {
         bytes
     }
 
-    fn write_varuint(out: &mut Vec<u8>, mut value: u64) {
-        loop {
-            let mut byte = (value & 0x7f) as u8;
-            value >>= 7;
-            if value != 0 {
-                byte |= 0x80;
-            }
-            out.push(byte);
-            if value == 0 {
-                break;
-            }
-        }
-    }
-
     #[test]
     fn a_pending_proof_reports_its_calendar() {
         let digest = [0x11u8; 32];
@@ -732,7 +943,7 @@ mod tests {
         let proof = AnchorProof { bytes };
         assert_eq!(
             calendar.verify(digest, &proof),
-            Ok(AnchorStatus::BitcoinAttested { height: 861_000 })
+            Ok(AnchorStatus::BitcoinAttested { height: 861_000, merkle_root: digest.to_vec() })
         );
     }
 
@@ -833,7 +1044,7 @@ mod tests {
         // though a pending one is also present.
         assert_eq!(
             calendar.verify(digest, &proof),
-            Ok(AnchorStatus::BitcoinAttested { height: 700_000 })
+            Ok(AnchorStatus::BitcoinAttested { height: 700_000, merkle_root: digest.to_vec() })
         );
     }
 
@@ -843,5 +1054,115 @@ mod tests {
         // silently reported as `Unattested`, which means something different
         // for `NullAnchor`.
         assert!(status_of(&[]).is_err());
+    }
+
+    /// prepend, sha256, append, sha256: the shape of one step up a Bitcoin
+    /// merkle path, computed here independently of the parser.
+    fn merkle_step_ops(left: &[u8], right: &[u8]) -> (Vec<Op>, Vec<u8>) {
+        let ops = vec![
+            Op::Prepend(left.to_vec()),
+            Op::Unary(OP_SHA256),
+            Op::Append(right.to_vec()),
+            Op::Unary(OP_SHA256),
+        ];
+        let digest = [0x5au8; 32];
+        let first = tvc_core::canonical::sha256_bytes(&[left, &digest[..]].concat());
+        let second = tvc_core::canonical::sha256_bytes(&[&first[..], right].concat());
+        (ops, second.to_vec())
+    }
+
+    #[test]
+    fn the_message_at_an_attestation_is_computed_along_its_path() {
+        let digest = [0x5au8; 32];
+        let (ops, expected) = merkle_step_ops(&[1u8; 32], &[2u8; 32]);
+        let mut subtree = vec![0x00];
+        subtree.extend_from_slice(&bitcoin_attestation(900_123));
+        let bytes = single_path_proof(&digest, &ops, &subtree);
+
+        let parsed = parse_proof(&bytes).unwrap();
+        assert_eq!(parsed.found.len(), 1);
+        assert_eq!(parsed.found[0].msg, expected);
+        assert_eq!(parsed.found[0].path, ops);
+        assert_eq!(
+            OpenTimestampsCalendar::default().verify(digest, &AnchorProof { bytes }),
+            Ok(AnchorStatus::BitcoinAttested {
+                height: 900_123,
+                merkle_root: expected
+            })
+        );
+    }
+
+    #[test]
+    fn a_pending_path_and_a_calendar_subtree_join_into_one_valid_proof() {
+        // The upgrade step: keep the operations down to the pending node, then
+        // append whatever the calendar returns for that node's message.
+        let digest = [0x5au8; 32];
+        let (ops, _) = merkle_step_ops(&[3u8; 32], &[4u8; 32]);
+        let mut pending = vec![0x00];
+        pending.extend_from_slice(&pending_attestation("https://alice.btc.calendar.opentimestamps.org"));
+        let original = parse_proof(&single_path_proof(&digest, &ops, &pending)).unwrap();
+        let node = &original.found[0];
+
+        // A calendar's answer: two more operations, then a Bitcoin attestation.
+        let mut calendar = Vec::new();
+        Op::Append(vec![9u8; 32]).serialize(&mut calendar);
+        Op::Unary(OP_SHA256).serialize(&mut calendar);
+        calendar.push(0x00);
+        calendar.extend_from_slice(&bitcoin_attestation(900_200));
+
+        let upgraded = parse_proof(&single_path_proof(&digest, &node.path, &calendar)).unwrap();
+        let expected =
+            tvc_core::canonical::sha256_bytes(&[node.msg.as_slice(), &[9u8; 32]].concat()).to_vec();
+        assert_eq!(upgraded.found.len(), 1);
+        assert_eq!(upgraded.found[0].attestation, ParsedAttestation::Bitcoin(900_200));
+        assert_eq!(upgraded.found[0].msg, expected);
+    }
+
+    #[test]
+    fn hexlify_reverse_and_keccak_behave_as_specified() {
+        assert_eq!(Op::Unary(OP_HEXLIFY).apply(&[0xab, 0x01]).unwrap(), b"ab01".to_vec());
+        assert_eq!(Op::Unary(OP_REVERSE).apply(&[1, 2, 3]).unwrap(), vec![3, 2, 1]);
+        assert!(Op::Unary(OP_REVERSE).apply(&[]).is_err());
+        assert!(Op::Unary(OP_HEXLIFY).apply(&[]).is_err());
+        assert!(Op::Unary(OP_KECCAK256).apply(&[1]).is_err());
+        // sha1 and ripemd160 of "abc", from their published test vectors.
+        assert_eq!(
+            hex::encode(&Op::Unary(OP_SHA1).apply(b"abc").unwrap()),
+            "a9993e364706816aba3e25717850c26c9cd0d89d"
+        );
+        assert_eq!(
+            hex::encode(&Op::Unary(OP_RIPEMD160).apply(b"abc").unwrap()),
+            "8eb208f7e05d987a9b044a8e98c6b087f15a0bfc"
+        );
+    }
+
+    #[test]
+    fn a_message_cannot_grow_past_the_limit() {
+        let big = vec![0u8; MAX_MSG_LEN];
+        assert!(Op::Append(vec![1]).apply(&big).is_err());
+        assert!(Op::Unary(OP_HEXLIFY).apply(&vec![1u8; MAX_MSG_LEN / 2 + 1]).is_err());
+    }
+
+    #[test]
+    fn only_known_calendars_over_https_are_contacted() {
+        for good in [
+            "https://alice.btc.calendar.opentimestamps.org",
+            "https://bob.btc.calendar.opentimestamps.org/",
+            "https://finney.calendar.eternitywall.com",
+            "https://btc.calendar.catallaxy.com",
+        ] {
+            assert!(calendar_allowed(good), "{good}");
+        }
+        for bad in [
+            "http://alice.btc.calendar.opentimestamps.org",
+            "https://calendar.opentimestamps.org.evil.example",
+            "https://evil.example/alice.btc.calendar.opentimestamps.org",
+            "https://alice.btc.calendar.opentimestamps.org:8443",
+            "https://.calendar.opentimestamps.org",
+            "https://alice.btc.calendar.opentimestamps.org?x=1",
+            "https://169.254.169.254",
+        ] {
+            assert!(!calendar_allowed(bad), "{bad}");
+        }
     }
 }
