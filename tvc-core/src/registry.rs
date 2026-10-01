@@ -65,10 +65,10 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::commitment::{commit_weights, SchemeCommitment, WeightCommitment, WeightVector};
-use crate::digest::{tagged_hash, DOMAIN_LEDGER_CHAIN};
+use crate::digest::{tagged_hash, DOMAIN_LEDGER_CHAIN, DOMAIN_LEDGER_DOCUMENT};
 use crate::error::{Result, TvcError};
 use crate::hex;
-use crate::signer::{RegistrationPayload, SignedRegistration};
+use crate::signer::{DocumentClaim, RegistrationPayload, SignedDocument, SignedRegistration};
 
 /// Digest the first record in a ledger extends.
 pub const GENESIS_DIGEST: [u8; 32] = [0u8; 32];
@@ -88,7 +88,15 @@ pub const GENESIS_DIGEST: [u8; 32] = [0u8; 32];
 ///   digest differently, and a reader that cannot reproduce a digest cannot
 ///   honestly report the record as verified. Failing loudly beats verifying
 ///   something other than what was signed.
-pub const FORMAT_VERSION: u32 = 2;
+///
+/// One ledger can hold lines of more than one version. Version 3 lines are
+/// signed documents ([`DocumentRecord`]). Model registrations are still written
+/// as version 2 lines ([`MODEL_RECORD_VERSION`]): their digest construction did
+/// not change, and rewriting them would only break ledgers already in use.
+pub const FORMAT_VERSION: u32 = 3;
+
+/// Format version a [`ModelRecord`] line is written and read at.
+pub const MODEL_RECORD_VERSION: u32 = 2;
 
 /// The metadata half of a registration: who and when, without the commitment.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -282,9 +290,9 @@ impl WireRecord {
                 .map_err(|error| TvcError::LedgerCorrupt { line, reason: format!("{name}: {error}") })
         };
 
-        if self.v != FORMAT_VERSION {
+        if self.v != MODEL_RECORD_VERSION {
             return Err(at(format!(
-                "record format version {} is not {FORMAT_VERSION}; this build cannot reproduce its digest",
+                "model record format version {} is not {MODEL_RECORD_VERSION}; this build cannot reproduce its digest",
                 self.v
             )));
         }
@@ -350,11 +358,162 @@ impl WireRecord {
     }
 }
 
-/// An append-only, file-backed registry of model registrations.
+/// One signed document claim in the ledger.
+///
+/// The ledger holds the claim (kind, document digest, references, timestamp,
+/// signer, signature), never the document itself. Documents are stored beside
+/// the ledger, content-addressed, so one can be published later than the claim
+/// about it and still be checked against it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DocumentRecord {
+    /// Record format version, always [`FORMAT_VERSION`] for documents.
+    pub format_version: u32,
+    /// Zero-based position in the ledger, shared with model records.
+    pub sequence: u64,
+    /// The signed claim.
+    pub signed: SignedDocument,
+    /// Digest of the preceding record of any kind, or [`GENESIS_DIGEST`].
+    pub previous: [u8; 32],
+    /// Digest over [`Self::previous`] and every field of this record.
+    pub digest: [u8; 32],
+}
+
+impl DocumentRecord {
+    /// Document kind.
+    pub fn kind(&self) -> &str {
+        &self.signed.claim.kind
+    }
+
+    /// SHA-256 of the document's canonical bytes.
+    pub fn document(&self) -> [u8; 32] {
+        self.signed.claim.document
+    }
+
+    /// Lowercase hex rendering of [`Self::digest`].
+    pub fn digest_hex(&self) -> String {
+        hex::encode(&self.digest)
+    }
+
+    fn compute_digest(
+        format_version: u32,
+        sequence: u64,
+        previous: &[u8; 32],
+        signed: &SignedDocument,
+    ) -> [u8; 32] {
+        let claim = &signed.claim;
+        let version_bytes = format_version.to_be_bytes();
+        let sequence_bytes = sequence.to_be_bytes();
+        let reference_count = (claim.refs.len() as u64).to_be_bytes();
+        let timestamp_bytes = claim.timestamp.to_be_bytes();
+        let mut parts: Vec<&[u8]> = vec![
+            previous,
+            &version_bytes,
+            &sequence_bytes,
+            claim.kind.as_bytes(),
+            &claim.document,
+            &reference_count,
+        ];
+        parts.extend(claim.refs.iter().map(<[u8; 32]>::as_slice));
+        parts.push(&timestamp_bytes);
+        parts.push(&signed.signer);
+        parts.push(&signed.signature);
+        tagged_hash(DOMAIN_LEDGER_DOCUMENT, &parts)
+    }
+
+    /// Renders this record as the JSON object the ledger stores.
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::to_value(WireDocument::from(self)).expect("record is always serialisable")
+    }
+}
+
+/// On-disk encoding of a [`DocumentRecord`]. Unknown fields are ignored for
+/// the same reason as on [`WireRecord`].
+#[derive(Serialize, Deserialize)]
+struct WireDocument {
+    v: u32,
+    sequence: u64,
+    kind: String,
+    document: String,
+    refs: Vec<String>,
+    timestamp: u64,
+    signer: String,
+    signature: String,
+    previous: String,
+    digest: String,
+}
+
+impl From<&DocumentRecord> for WireDocument {
+    fn from(record: &DocumentRecord) -> Self {
+        let claim = &record.signed.claim;
+        Self {
+            v: record.format_version,
+            sequence: record.sequence,
+            kind: claim.kind.clone(),
+            document: hex::encode(&claim.document),
+            refs: claim.refs.iter().map(|r| hex::encode(r)).collect(),
+            timestamp: claim.timestamp,
+            signer: hex::encode(&record.signed.signer),
+            signature: hex::encode(&record.signed.signature),
+            previous: hex::encode(&record.previous),
+            digest: record.digest_hex(),
+        }
+    }
+}
+
+impl WireDocument {
+    fn into_record(self, line: usize) -> Result<DocumentRecord> {
+        let at = |reason: String| TvcError::LedgerCorrupt { line, reason };
+        let field = |name: &str, value: &str| -> Result<[u8; 32]> {
+            hex::decode_array::<32>(value).map_err(|error| at(format!("{name}: {error}")))
+        };
+        let refs = self
+            .refs
+            .iter()
+            .map(|r| field("refs", r))
+            .collect::<Result<Vec<_>>>()?;
+        let signed = SignedDocument {
+            claim: DocumentClaim::new(self.kind, field("document", &self.document)?, refs, self.timestamp),
+            signature: hex::decode_array::<64>(&self.signature)
+                .map_err(|error| at(format!("signature: {error}")))?,
+            signer: field("signer", &self.signer)?,
+        };
+        let previous = field("previous", &self.previous)?;
+        let recorded = field("digest", &self.digest)?;
+        let computed = DocumentRecord::compute_digest(self.v, self.sequence, &previous, &signed);
+        if computed != recorded {
+            return Err(at(format!(
+                "record digest {} does not match its contents, which hash to {}",
+                hex::encode(&recorded),
+                hex::encode(&computed)
+            )));
+        }
+        Ok(DocumentRecord {
+            format_version: self.v,
+            sequence: self.sequence,
+            signed,
+            previous,
+            digest: recorded,
+        })
+    }
+}
+
+/// Where a ledger entry lives in the in-memory index.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Slot {
+    Model(usize),
+    Document(usize),
+}
+
+/// An append-only, file-backed ledger of model registrations and signed documents.
 #[derive(Debug)]
 pub struct ModelRegistry {
     path: PathBuf,
     records: Vec<ModelRecord>,
+    documents: Vec<DocumentRecord>,
+    /// Every entry, in ledger order.
+    order: Vec<Slot>,
+    /// Maps a document digest to its position in `documents`.
+    by_document: BTreeMap<[u8; 32], usize>,
     /// Maps `<model_id>:<version>` to its position in `records`.
     by_address: BTreeMap<String, usize>,
     /// Byte length of the ledger when this handle last read or wrote it.
@@ -396,6 +555,9 @@ impl ModelRegistry {
         let mut registry = Self {
             path,
             records: Vec::new(),
+            documents: Vec::new(),
+            order: Vec::new(),
+            by_document: BTreeMap::new(),
             by_address: BTreeMap::new(),
             observed_len: 0,
         };
@@ -407,50 +569,70 @@ impl ModelRegistry {
             if line.trim().is_empty() {
                 continue;
             }
+            let corrupt = |reason: String| TvcError::LedgerCorrupt {
+                line: line_number,
+                reason,
+            };
 
-            let wire: WireRecord = serde_json::from_str(&line).map_err(|error| {
-                TvcError::LedgerCorrupt {
-                    line: line_number,
-                    reason: format!("not a registry record: {error}"),
+            let value: serde_json::Value = serde_json::from_str(&line)
+                .map_err(|error| corrupt(format!("not a registry record: {error}")))?;
+            let version = value
+                .get("v")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| corrupt("not a registry record: no format version".to_owned()))?;
+
+            let (sequence, record_previous, digest) = if version == u64::from(FORMAT_VERSION) {
+                let wire: WireDocument = serde_json::from_value(value)
+                    .map_err(|error| corrupt(format!("not a document record: {error}")))?;
+                let record = wire.into_record(line_number)?;
+                // A stored claim whose signature no longer verifies, or that
+                // points at a document not yet in the ledger, means the file was
+                // edited after the fact; refuse to serve it as valid.
+                registry
+                    .check_document(&record.signed)
+                    .map_err(|error| corrupt(format!("stored document claim is invalid: {error}")))?;
+                let summary = (record.sequence, record.previous, record.digest);
+                registry
+                    .by_document
+                    .insert(record.document(), registry.documents.len());
+                registry.order.push(Slot::Document(registry.documents.len()));
+                registry.documents.push(record);
+                summary
+            } else {
+                let wire: WireRecord = serde_json::from_value(value)
+                    .map_err(|error| corrupt(format!("not a registry record: {error}")))?;
+                let record = wire.into_record(line_number)?;
+                record
+                    .registration
+                    .verify()
+                    .map_err(|error| corrupt(format!("stored attestation does not verify: {error}")))?;
+                let address = record.address();
+                if registry.by_address.contains_key(&address) {
+                    return Err(corrupt(format!(
+                        "{address} appears twice; the registry is append-only"
+                    )));
                 }
-            })?;
-            let record = wire.into_record(line_number)?;
+                let summary = (record.sequence, record.previous, record.digest);
+                registry.by_address.insert(address, registry.records.len());
+                registry.order.push(Slot::Model(registry.records.len()));
+                registry.records.push(record);
+                summary
+            };
 
-            if record.sequence != registry.records.len() as u64 {
-                return Err(TvcError::LedgerCorrupt {
-                    line: line_number,
-                    reason: format!(
-                        "sequence {} out of order; expected {}",
-                        record.sequence,
-                        registry.records.len()
-                    ),
-                });
+            let expected_sequence = registry.order.len() as u64 - 1;
+            if sequence != expected_sequence {
+                return Err(corrupt(format!(
+                    "sequence {sequence} out of order; expected {expected_sequence}"
+                )));
             }
-            if record.previous != previous {
+            if record_previous != previous {
                 return Err(TvcError::LedgerChainBroken {
                     line: line_number,
-                    expected: hex::encode(&record.previous),
+                    expected: hex::encode(&record_previous),
                     observed: hex::encode(&previous),
                 });
             }
-            // A stored record whose signature no longer verifies means the file
-            // was edited after the fact; refuse to serve it as if it were valid.
-            record.registration.verify().map_err(|error| TvcError::LedgerCorrupt {
-                line: line_number,
-                reason: format!("stored attestation does not verify: {error}"),
-            })?;
-
-            let address = record.address();
-            if registry.by_address.contains_key(&address) {
-                return Err(TvcError::LedgerCorrupt {
-                    line: line_number,
-                    reason: format!("{address} appears twice; the registry is append-only"),
-                });
-            }
-
-            previous = record.digest;
-            registry.by_address.insert(address, registry.records.len());
-            registry.records.push(record);
+            previous = digest;
         }
 
         registry.observed_len = std::fs::metadata(&registry.path)?.len();
@@ -503,25 +685,97 @@ impl ModelRegistry {
             return Err(TvcError::DuplicateRegistration(address));
         }
 
-        let sequence = self.records.len() as u64;
+        let sequence = self.order.len() as u64;
         let previous = self.head();
         let record = ModelRecord {
             digest: ModelRecord::compute_digest(
-                FORMAT_VERSION,
+                MODEL_RECORD_VERSION,
                 sequence,
                 &previous,
                 &registration,
             ),
-            format_version: FORMAT_VERSION,
+            format_version: MODEL_RECORD_VERSION,
             sequence,
             registration,
             previous,
         };
 
-        let mut line = serde_json::to_string(&WireRecord::from(&record))
+        let line = serde_json::to_string(&WireRecord::from(&record))
             .map_err(|error| TvcError::Io(format!("could not encode record: {error}")))?;
-        line.push('\n');
+        self.append_line(line)?;
 
+        self.by_address.insert(address, self.records.len());
+        self.order.push(Slot::Model(self.records.len()));
+        self.records.push(record.clone());
+        Ok(record)
+    }
+
+    /// Appends a signed document claim to the ledger.
+    ///
+    /// Checked before anything is written: the signature must verify under the
+    /// embedded key, the same document digest must not already be in the
+    /// ledger, and every reference must name a document that is already in the
+    /// ledger. The last rule is what makes ledger order mean something: a
+    /// record can only build on what came before it, so a reference run cannot
+    /// cite a setup that was published after it.
+    ///
+    /// The ledger does not see the document, only its digest. Whether the
+    /// document's own fields agree with the claim's references is checked by
+    /// whoever holds the document; see `tvc verify-reference`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TvcError::AttestationUnsigned`], [`TvcError::InvalidIdentifier`]
+    /// or [`TvcError::InvalidDocument`] for a bad claim,
+    /// [`TvcError::DuplicateRegistration`] for a repeated document, and the
+    /// append errors of [`Self::register_signed`].
+    pub fn register_document(&mut self, signed: SignedDocument) -> Result<DocumentRecord> {
+        self.check_document(&signed)?;
+
+        let sequence = self.order.len() as u64;
+        let previous = self.head();
+        let record = DocumentRecord {
+            digest: DocumentRecord::compute_digest(FORMAT_VERSION, sequence, &previous, &signed),
+            format_version: FORMAT_VERSION,
+            sequence,
+            signed,
+            previous,
+        };
+        let line = serde_json::to_string(&WireDocument::from(&record))
+            .map_err(|error| TvcError::Io(format!("could not encode record: {error}")))?;
+        self.append_line(line)?;
+
+        self.by_document
+            .insert(record.document(), self.documents.len());
+        self.order.push(Slot::Document(self.documents.len()));
+        self.documents.push(record.clone());
+        Ok(record)
+    }
+
+    /// The rules a document claim must meet against the entries before it.
+    fn check_document(&self, signed: &SignedDocument) -> Result<()> {
+        signed.verify()?;
+        let claim = &signed.claim;
+        if self.by_document.contains_key(&claim.document) {
+            return Err(TvcError::DuplicateRegistration(format!(
+                "document {}",
+                hex::encode(&claim.document)
+            )));
+        }
+        for reference in &claim.refs {
+            if !self.by_document.contains_key(reference) {
+                return Err(TvcError::InvalidDocument(format!(
+                    "reference {} is not an earlier document in this ledger",
+                    hex::encode(reference)
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Writes one record line under the exclusive lock, refusing a stale view.
+    fn append_line(&mut self, mut line: String) -> Result<()> {
+        line.push('\n');
         let mut file = OpenOptions::new().append(true).create(true).open(&self.path)?;
         // An exclusive advisory lock, released by the operating system when this
         // handle drops — including on a crash or a kill, which is why this is an
@@ -548,10 +802,7 @@ impl ModelRegistry {
         })();
         let _ = file.unlock();
         self.observed_len = outcome?;
-
-        self.by_address.insert(address, self.records.len());
-        self.records.push(record.clone());
-        Ok(record)
+        Ok(())
     }
 
     /// Returns the most recent registration for a model identifier.
@@ -592,9 +843,21 @@ impl ModelRegistry {
             .collect()
     }
 
-    /// Every record in the ledger, in order.
+    /// Every model registration in the ledger, in order.
     pub fn records(&self) -> &[ModelRecord] {
         &self.records
+    }
+
+    /// Every signed document claim in the ledger, in order.
+    pub fn documents(&self) -> &[DocumentRecord] {
+        &self.documents
+    }
+
+    /// The claim about one document, by its digest.
+    pub fn get_document(&self, document: &[u8; 32]) -> Option<&DocumentRecord> {
+        self.by_document
+            .get(document)
+            .map(|index| &self.documents[*index])
     }
 
     /// Digest of the last record, or [`GENESIS_DIGEST`] for an empty ledger.
@@ -602,9 +865,11 @@ impl ModelRegistry {
     /// This is the value to publish or pin: holding an earlier head is what lets
     /// a consumer detect that history was rewritten underneath them.
     pub fn head(&self) -> [u8; 32] {
-        self.records
-            .last()
-            .map_or(GENESIS_DIGEST, |record| record.digest)
+        match self.order.last() {
+            None => GENESIS_DIGEST,
+            Some(Slot::Model(index)) => self.records[*index].digest,
+            Some(Slot::Document(index)) => self.documents[*index].digest,
+        }
     }
 
     /// Lowercase hex rendering of [`Self::head`].
@@ -760,29 +1025,45 @@ impl ModelRegistry {
     /// Returns [`TvcError::LedgerChainBroken`] at the first divergent record.
     pub fn verify_chain(&self) -> Result<()> {
         let mut previous = GENESIS_DIGEST;
-        for (index, record) in self.records.iter().enumerate() {
+        for (index, slot) in self.order.iter().enumerate() {
             let line = index + 1;
-            if record.previous != previous {
+            let (record_previous, recorded, computed) = match slot {
+                Slot::Model(position) => {
+                    let record = &self.records[*position];
+                    let computed = ModelRecord::compute_digest(
+                        record.format_version,
+                        record.sequence,
+                        &record.previous,
+                        &record.registration,
+                    );
+                    (record.previous, record.digest, computed)
+                }
+                Slot::Document(position) => {
+                    let record = &self.documents[*position];
+                    let computed = DocumentRecord::compute_digest(
+                        record.format_version,
+                        record.sequence,
+                        &record.previous,
+                        &record.signed,
+                    );
+                    (record.previous, record.digest, computed)
+                }
+            };
+            if record_previous != previous {
                 return Err(TvcError::LedgerChainBroken {
                     line,
-                    expected: hex::encode(&record.previous),
+                    expected: hex::encode(&record_previous),
                     observed: hex::encode(&previous),
                 });
             }
-            let computed = ModelRecord::compute_digest(
-                record.format_version,
-                record.sequence,
-                &record.previous,
-                &record.registration,
-            );
-            if computed != record.digest {
+            if computed != recorded {
                 return Err(TvcError::LedgerChainBroken {
                     line,
-                    expected: record.digest_hex(),
+                    expected: hex::encode(&recorded),
                     observed: hex::encode(&computed),
                 });
             }
-            previous = record.digest;
+            previous = recorded;
         }
         Ok(())
     }
@@ -811,14 +1092,14 @@ impl ModelRegistry {
             .collect()
     }
 
-    /// Number of records in the ledger.
+    /// Number of records in the ledger, of every kind.
     pub fn len(&self) -> usize {
-        self.records.len()
+        self.order.len()
     }
 
     /// Whether the ledger holds no records.
     pub fn is_empty(&self) -> bool {
-        self.records.is_empty()
+        self.order.is_empty()
     }
 
     /// Path of the backing file.
@@ -1512,5 +1793,191 @@ mod tests {
         assert_eq!(text.lines().count(), 1);
         assert!(text.ends_with('\n'));
         assert!(serde_json::from_str::<serde_json::Value>(text.trim()).is_ok());
+    }
+
+    fn signed_document(
+        keypair: &PublisherKeypair,
+        kind: &str,
+        document: [u8; 32],
+        refs: Vec<[u8; 32]>,
+    ) -> SignedDocument {
+        keypair
+            .sign_document(&DocumentClaim::new(kind, document, refs, 1_760_000_000), &[4u8; 32])
+            .unwrap()
+    }
+
+    #[test]
+    fn documents_and_registrations_share_one_chain_across_reopen() {
+        let scratch = Scratch::new("mixed");
+        let keypair = publisher();
+        let head = {
+            let mut registry = ModelRegistry::open(scratch.ledger()).unwrap();
+            registry
+                .register_signed(sign(&keypair, "acme/model", "1.0.0", commitment_of(&[1.0])))
+                .unwrap();
+            let manifest = signed_document(&keypair, "weights-manifest/v1", [1; 32], vec![]);
+            registry.register_document(manifest).unwrap();
+            let setup = signed_document(&keypair, "reference-setup/v1", [2; 32], vec![[1; 32]]);
+            let record = registry.register_document(setup).unwrap();
+            assert_eq!(record.sequence, 2);
+            assert_eq!(registry.head(), record.digest);
+            registry.head()
+        };
+
+        let reopened = ModelRegistry::open(scratch.ledger()).unwrap();
+        assert_eq!(reopened.len(), 3);
+        assert_eq!(reopened.records().len(), 1);
+        assert_eq!(reopened.documents().len(), 2);
+        assert_eq!(reopened.head(), head);
+        assert_eq!(reopened.verify_chain(), Ok(()));
+        assert_eq!(
+            reopened.get_document(&[2; 32]).unwrap().kind(),
+            "reference-setup/v1"
+        );
+
+        // Model lines stay v2, document lines are v3, in the same file.
+        let text = std::fs::read_to_string(scratch.ledger()).unwrap();
+        let versions: Vec<u64> = text
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()["v"].as_u64().unwrap())
+            .collect();
+        assert_eq!(versions, vec![2, 3, 3]);
+    }
+
+    #[test]
+    fn a_reference_to_a_document_not_yet_published_is_refused() {
+        let scratch = Scratch::new("forward-ref");
+        let mut registry = ModelRegistry::open(scratch.ledger()).unwrap();
+        let keypair = publisher();
+        let run = signed_document(&keypair, "reference-run/v1", [3; 32], vec![[2; 32]]);
+        assert!(matches!(
+            registry.register_document(run),
+            Err(TvcError::InvalidDocument(_))
+        ));
+        assert!(registry.is_empty());
+    }
+
+    #[test]
+    fn the_same_document_cannot_be_published_twice() {
+        let scratch = Scratch::new("dup-doc");
+        let mut registry = ModelRegistry::open(scratch.ledger()).unwrap();
+        let keypair = publisher();
+        registry
+            .register_document(signed_document(&keypair, "weights-manifest/v1", [1; 32], vec![]))
+            .unwrap();
+        assert!(matches!(
+            registry.register_document(signed_document(&keypair, "profile/v1", [1; 32], vec![])),
+            Err(TvcError::DuplicateRegistration(_))
+        ));
+    }
+
+    #[test]
+    fn an_unsigned_document_claim_is_never_stored() {
+        let scratch = Scratch::new("unsigned-doc");
+        let mut registry = ModelRegistry::open(scratch.ledger()).unwrap();
+        let mut forged = signed_document(&publisher(), "weights-manifest/v1", [1; 32], vec![]);
+        forged.signature[0] ^= 0xff;
+        assert_eq!(registry.register_document(forged), Err(TvcError::AttestationUnsigned));
+        assert!(registry.is_empty());
+    }
+
+    #[test]
+    fn a_document_line_edited_on_disk_is_caught() {
+        let scratch = Scratch::new("edit-doc");
+        let keypair = publisher();
+        {
+            let mut registry = ModelRegistry::open(scratch.ledger()).unwrap();
+            registry
+                .register_document(signed_document(&keypair, "weights-manifest/v1", [1; 32], vec![]))
+                .unwrap();
+        }
+        let text = std::fs::read_to_string(scratch.ledger()).unwrap();
+        let mut wire: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
+        wire["document"] = serde_json::json!(hex::encode(&[9u8; 32]));
+        std::fs::write(scratch.ledger(), format!("{wire}\n")).unwrap();
+        assert!(matches!(
+            ModelRegistry::open(scratch.ledger()),
+            Err(TvcError::LedgerCorrupt { line: 1, .. })
+        ));
+    }
+
+    #[test]
+    fn a_rewritten_line_with_a_recomputed_digest_still_fails_on_its_signature() {
+        // An editor who knows the digest rule recomputes it after changing the
+        // timestamp. The digest now checks out; the signature does not.
+        let scratch = Scratch::new("redigest-doc");
+        let keypair = publisher();
+        let mut record = {
+            let mut registry = ModelRegistry::open(scratch.ledger()).unwrap();
+            registry
+                .register_document(signed_document(&keypair, "weights-manifest/v1", [1; 32], vec![]))
+                .unwrap()
+        };
+        record.signed.claim.timestamp -= 86_400;
+        record.digest = DocumentRecord::compute_digest(
+            record.format_version,
+            record.sequence,
+            &record.previous,
+            &record.signed,
+        );
+        std::fs::write(scratch.ledger(), format!("{}\n", record.to_json())).unwrap();
+        assert!(matches!(
+            ModelRegistry::open(scratch.ledger()),
+            Err(TvcError::LedgerCorrupt { line: 1, .. })
+        ));
+    }
+
+    #[test]
+    fn swapping_a_document_before_the_one_it_cites_breaks_the_ledger() {
+        let scratch = Scratch::new("reorder-doc");
+        let keypair = publisher();
+        {
+            let mut registry = ModelRegistry::open(scratch.ledger()).unwrap();
+            registry
+                .register_document(signed_document(&keypair, "weights-manifest/v1", [1; 32], vec![]))
+                .unwrap();
+            registry
+                .register_document(signed_document(&keypair, "reference-setup/v1", [2; 32], vec![[1; 32]]))
+                .unwrap();
+        }
+        let text = std::fs::read_to_string(scratch.ledger()).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        std::fs::write(scratch.ledger(), format!("{}\n{}\n", lines[1], lines[0])).unwrap();
+        assert!(ModelRegistry::open(scratch.ledger()).is_err());
+    }
+
+    #[test]
+    fn an_unknown_document_version_is_refused() {
+        let scratch = Scratch::new("future-doc");
+        let keypair = publisher();
+        {
+            let mut registry = ModelRegistry::open(scratch.ledger()).unwrap();
+            registry
+                .register_document(signed_document(&keypair, "weights-manifest/v1", [1; 32], vec![]))
+                .unwrap();
+        }
+        let text = std::fs::read_to_string(scratch.ledger()).unwrap();
+        let mut wire: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
+        wire["v"] = serde_json::json!(FORMAT_VERSION + 1);
+        std::fs::write(scratch.ledger(), format!("{wire}\n")).unwrap();
+        assert!(matches!(
+            ModelRegistry::open(scratch.ledger()),
+            Err(TvcError::LedgerCorrupt { line: 1, .. })
+        ));
+    }
+
+    #[test]
+    fn a_stale_handle_cannot_append_a_document_either() {
+        let scratch = Scratch::new("stale-doc");
+        let keypair = publisher();
+        let mut first = ModelRegistry::open(scratch.ledger()).unwrap();
+        let mut second = ModelRegistry::open(scratch.ledger()).unwrap();
+        first
+            .register_document(signed_document(&keypair, "weights-manifest/v1", [1; 32], vec![]))
+            .unwrap();
+        assert!(matches!(
+            second.register_document(signed_document(&keypair, "weights-manifest/v1", [5; 32], vec![])),
+            Err(TvcError::LedgerChangedUnderneath { .. })
+        ));
     }
 }

@@ -48,7 +48,9 @@ use secp256k1::{schnorr, Keypair, SecretKey, XOnlyPublicKey};
 use zeroize::Zeroizing;
 
 use crate::commitment::WeightCommitment;
-use crate::digest::{tagged_hash, DOMAIN_PUBLISHER_KEY, DOMAIN_REGISTRATION_SIGHASH};
+use crate::digest::{
+    tagged_hash, DOMAIN_DOCUMENT_SIGHASH_PREFIX, DOMAIN_PUBLISHER_KEY, DOMAIN_REGISTRATION_SIGHASH,
+};
 use crate::error::{Result, TvcError};
 use crate::hex;
 
@@ -282,6 +284,200 @@ impl PublisherKeypair {
             signature: *signature.as_ref(),
             publisher: self.public,
         })
+    }
+}
+
+impl PublisherKeypair {
+    /// Signs a claim about a published document with a BIP-340 signature.
+    ///
+    /// `aux_rand` has the same role and the same requirements as in [`Self::sign`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TvcError::InvalidIdentifier`] or [`TvcError::InvalidDocument`]
+    /// if the claim does not validate, so an unsafe kind name can never
+    /// acquire a signature.
+    pub fn sign_document(
+        &self,
+        claim: &DocumentClaim,
+        aux_rand: &[u8; 32],
+    ) -> Result<SignedDocument> {
+        claim.validate()?;
+        let key = SecretKey::from_secret_bytes(*self.secret)?;
+        let keypair = Keypair::from_secret_key(&key);
+        let signature = schnorr::sign_with_aux_rand(&claim.sighash(&self.public), &keypair, aux_rand);
+        Ok(SignedDocument {
+            claim: claim.clone(),
+            signature: *signature.as_ref(),
+            signer: self.public,
+        })
+    }
+}
+
+/// Maximum length of a document kind.
+pub const KIND_MAX_LEN: usize = 64;
+
+/// Rejects document kinds that are not `<name>/v<number>`.
+///
+/// The name is lowercase ASCII letters, digits and `-`, starting with a letter
+/// or digit, for example `reference-run/v1`. The version is part of the kind on
+/// purpose: a reader that does not know `reference-run/v2` should treat it as an
+/// unknown kind, not misread it as v1.
+///
+/// # Errors
+///
+/// Returns [`TvcError::InvalidIdentifier`] naming the reason.
+pub fn validate_kind(kind: &str) -> Result<()> {
+    let field = "kind";
+    check_length(field, kind, KIND_MAX_LEN)?;
+    let refuse = |reason: &str| {
+        Err(TvcError::InvalidIdentifier {
+            field,
+            reason: format!("{kind:?} {reason}; expected <name>/v<number>, e.g. reference-run/v1"),
+        })
+    };
+    let Some((name, version)) = kind.split_once("/v") else {
+        return refuse("has no /v<number> suffix");
+    };
+    let name_ok = name
+        .chars()
+        .next()
+        .is_some_and(|first| first.is_ascii_lowercase() || first.is_ascii_digit())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    if !name_ok {
+        return refuse("has a name outside [a-z0-9-]");
+    }
+    if version.is_empty() || !version.chars().all(|c| c.is_ascii_digit()) {
+        return refuse("has a version that is not a number");
+    }
+    Ok(())
+}
+
+/// What a signer asserts about one published document.
+///
+/// *"I, the holder of this key, published the document whose canonical
+/// SHA-256 is `document`, of kind `kind`, building on the documents `refs`,
+/// as of `timestamp`."* The document itself is not in the claim, only its
+/// digest, so a claim can be made about a document whose content is published
+/// separately.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DocumentClaim {
+    /// Document kind, for example `reference-run/v1`.
+    pub kind: String,
+    /// SHA-256 of the document's canonical bytes.
+    pub document: [u8; 32],
+    /// Digests of earlier documents this one builds on, in the order the
+    /// document lists them.
+    pub refs: Vec<[u8; 32]>,
+    /// Seconds since the Unix epoch, as asserted by the signer.
+    pub timestamp: u64,
+}
+
+impl DocumentClaim {
+    /// Assembles a claim.
+    pub fn new(
+        kind: impl Into<String>,
+        document: [u8; 32],
+        refs: Vec<[u8; 32]>,
+        timestamp: u64,
+    ) -> Self {
+        Self {
+            kind: kind.into(),
+            document,
+            refs,
+            timestamp,
+        }
+    }
+
+    /// Confirms the kind is well formed and no reference is repeated or self-referential.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TvcError::InvalidIdentifier`] for a bad kind, or
+    /// [`TvcError::InvalidDocument`] for a repeated or self reference.
+    pub fn validate(&self) -> Result<()> {
+        validate_kind(&self.kind)?;
+        let mut seen = std::collections::BTreeSet::new();
+        for reference in &self.refs {
+            if reference == &self.document {
+                return Err(TvcError::InvalidDocument(
+                    "a document cannot refer to itself".to_owned(),
+                ));
+            }
+            if !seen.insert(*reference) {
+                return Err(TvcError::InvalidDocument(format!(
+                    "reference {} appears twice",
+                    hex::encode(reference)
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// The 32-byte message a signer signs.
+    ///
+    /// Signed under a tag that includes the kind
+    /// (`W-TVC/v2/document/<kind>`), so a signature over a `reference-run/v1`
+    /// claim can never be presented as one over a `profile/v1` claim with the
+    /// same digest. The kind is also absorbed as a part, which makes the
+    /// message self-describing for anyone re-deriving it by hand.
+    pub fn sighash(&self, signer: &[u8; 32]) -> [u8; 32] {
+        let tag = format!("{DOMAIN_DOCUMENT_SIGHASH_PREFIX}{}", self.kind);
+        let reference_count = (self.refs.len() as u64).to_be_bytes();
+        let timestamp = self.timestamp.to_be_bytes();
+        let mut parts: Vec<&[u8]> = vec![
+            signer,
+            self.kind.as_bytes(),
+            &self.document,
+            &reference_count,
+        ];
+        parts.extend(self.refs.iter().map(<[u8; 32]>::as_slice));
+        parts.push(&timestamp);
+        tagged_hash(&tag, &parts)
+    }
+}
+
+/// A [`DocumentClaim`] with its signature and the key that produced it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SignedDocument {
+    /// The signed claim.
+    pub claim: DocumentClaim,
+    /// 64-byte BIP-340 signature over [`DocumentClaim::sighash`].
+    pub signature: [u8; 64],
+    /// 32-byte x-only public key of the signer.
+    pub signer: [u8; 32],
+}
+
+impl SignedDocument {
+    /// Verifies the signature against the embedded signer key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TvcError::AttestationUnsigned`] if it does not verify, or the
+    /// claim's own validation error.
+    pub fn verify(&self) -> Result<()> {
+        self.claim.validate()?;
+        let pubkey = XOnlyPublicKey::from_byte_array(self.signer)?;
+        schnorr::Signature::from_byte_array(self.signature)
+            .verify(&self.claim.sighash(&self.signer), &pubkey)
+            .map_err(|_| TvcError::AttestationUnsigned)
+    }
+
+    /// Verifies the signature and pins it to an expected signer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TvcError::SignerMismatch`] for another key, or as [`Self::verify`].
+    pub fn verify_signed_by(&self, expected: &[u8; 32]) -> Result<()> {
+        if &self.signer != expected {
+            return Err(TvcError::SignerMismatch {
+                expected: hex::encode(expected),
+                observed: hex::encode(&self.signer),
+            });
+        }
+        self.verify()
     }
 }
 
@@ -665,5 +861,90 @@ mod tests {
     #[test]
     fn an_invalid_scalar_is_rejected() {
         assert!(PublisherKeypair::from_secret_bytes(&[0u8; 32]).is_err());
+    }
+
+    fn claim(kind: &str) -> DocumentClaim {
+        DocumentClaim::new(kind, [0xd0; 32], vec![[0x0a; 32]], 1_760_000_000)
+    }
+
+    #[test]
+    fn a_signed_document_verifies_and_pins() {
+        let signed = keypair().sign_document(&claim("reference-run/v1"), &[3u8; 32]).unwrap();
+        assert_eq!(signed.verify(), Ok(()));
+        assert_eq!(signed.verify_signed_by(&keypair().public_key()), Ok(()));
+        let other = PublisherKeypair::generate(&[9u8; 32]).unwrap();
+        assert!(matches!(
+            signed.verify_signed_by(&other.public_key()),
+            Err(TvcError::SignerMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn a_document_signature_does_not_transfer_between_kinds() {
+        let signed = keypair().sign_document(&claim("reference-run/v1"), &[3u8; 32]).unwrap();
+        let mut relabelled = signed;
+        relabelled.claim.kind = "profile/v1".to_owned();
+        assert_eq!(relabelled.verify(), Err(TvcError::AttestationUnsigned));
+    }
+
+    #[test]
+    fn every_claim_field_is_covered_by_the_signature() {
+        let signed = keypair().sign_document(&claim("reference-run/v1"), &[3u8; 32]).unwrap();
+
+        let mut other_document = signed.clone();
+        other_document.claim.document[0] ^= 1;
+        assert_eq!(other_document.verify(), Err(TvcError::AttestationUnsigned));
+
+        let mut other_refs = signed.clone();
+        other_refs.claim.refs.push([0x0b; 32]);
+        assert_eq!(other_refs.verify(), Err(TvcError::AttestationUnsigned));
+
+        let mut no_refs = signed.clone();
+        no_refs.claim.refs.clear();
+        assert_eq!(no_refs.verify(), Err(TvcError::AttestationUnsigned));
+
+        let mut backdated = signed;
+        backdated.claim.timestamp -= 1;
+        assert_eq!(backdated.verify(), Err(TvcError::AttestationUnsigned));
+    }
+
+    #[test]
+    fn document_and_registration_domains_are_separate() {
+        // The same signer and the same 32 bytes never produce one message for
+        // both a registration and a document.
+        let registration = payload().sighash(&keypair().public_key());
+        let document = claim("model-registration/v2").sighash(&keypair().public_key());
+        assert_ne!(registration, document);
+    }
+
+    #[test]
+    fn kinds_must_be_name_slash_version() {
+        for good in ["reference-run/v1", "weights-manifest/v1", "profile/v12", "x9/v0"] {
+            assert!(validate_kind(good).is_ok(), "{good}");
+        }
+        for bad in [
+            "",
+            "reference-run",
+            "reference-run/1",
+            "Reference-Run/v1",
+            "reference run/v1",
+            "-run/v1",
+            "run/v",
+            "run/v1x",
+            "a/b/v1",
+        ] {
+            assert!(validate_kind(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn repeated_or_self_references_are_refused() {
+        let mut repeated = claim("profile/v1");
+        repeated.refs = vec![[1; 32], [1; 32]];
+        assert!(keypair().sign_document(&repeated, &[3u8; 32]).is_err());
+
+        let mut circular = claim("profile/v1");
+        circular.refs = vec![circular.document];
+        assert!(keypair().sign_document(&circular, &[3u8; 32]).is_err());
     }
 }

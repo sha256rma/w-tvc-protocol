@@ -138,10 +138,15 @@ pub use commitment::{
     WeightVector, MERKLE_SCHEME_TAG,
 };
 pub use error::{Result, TvcError};
-pub use registry::{ModelMetadata, ModelRecord, ModelRegistry, FORMAT_VERSION, GENESIS_DIGEST};
+pub use itemset::{select, ItemReveal, ItemSet};
+pub use manifest::{ManifestFile, ManifestMismatch, WeightsManifest};
+pub use registry::{
+    DocumentRecord, ModelMetadata, ModelRecord, ModelRegistry, FORMAT_VERSION, GENESIS_DIGEST,
+    MODEL_RECORD_VERSION,
+};
 pub use signer::{
-    unix_now, validate_model_id, validate_version, PublisherKeypair, RegistrationPayload,
-    SignedRegistration,
+    unix_now, validate_kind, validate_model_id, validate_version, DocumentClaim, PublisherKeypair,
+    RegistrationPayload, SignedDocument, SignedRegistration,
 };
 
 /// Semantic version of the protocol this crate implements.
