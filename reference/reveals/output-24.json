@@ -1,0 +1,22 @@
+{
+  "count": 36,
+  "index": 24,
+  "item": {
+    "done_reason": "stop",
+    "eval_count": 7,
+    "id": 8,
+    "prompt_eval_count": 48,
+    "response": "159674",
+    "sample": 0
+  },
+  "kind": "item-reveal/v1",
+  "salt": "8c66444972597e4f4f52e7606c36ce60d8a5dabeb8e1df4b370ec50fd22bb627",
+  "siblings": [
+    "074b518cc911caeb1783911f1698394561690a33ed2be54975ca365f413412ed",
+    "6df865a787721a8cde9b976d299a75a02cdc94b669b609478744a12e73ebc04e",
+    "fa70b505794425fe7f77ac3b75645abca95514a094f10c1000c1f3dd82fc5a6f",
+    "4735eba90f710d96c69cfc32fae791fd2f21057fd487407eb1dfce0fe7059d0f",
+    "9e6ca6cad008f6ff6351ff994cb53dc9ae9447df2e00f638d25b84580be01bb0",
+    "4b1faf97cde0508af68ea0675b056eb51007c5c4cb7994c52740b02d8700ea83"
+  ]
+}

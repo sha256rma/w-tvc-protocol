@@ -1,0 +1,21 @@
+{
+  "count": 12,
+  "index": 8,
+  "item": {
+    "check": "QZ-03",
+    "id": 8,
+    "messages": [
+      {
+        "content": "What is 4821 multiplied by 37? Answer with the number only.",
+        "role": "user"
+      }
+    ]
+  },
+  "kind": "item-reveal/v1",
+  "salt": "7cb529d75390745f41a2bb4554f0662e011e2e8f94d8e10b6d4bdf2c48fb22ab",
+  "siblings": [
+    "b6e5bd613141712c589e266d7e8ef4520a1e66b08376abb6bfd0ccc459373da6",
+    "e0df484a4b8786af28703802060fdbd2e2b09d0f1362c9e9fd958c9f5eb47a2d",
+    "a9e599698ddba15083df19b60f27adb107399215dc575ded1ea12c4159266b10"
+  ]
+}
