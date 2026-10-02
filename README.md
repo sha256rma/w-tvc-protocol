@@ -88,6 +88,41 @@ The reference also records the model's wrong answers. It says the capital of Aus
 
 The harness that produced the run is [`reference/run_ollama_reference.py`](reference/run_ollama_reference.py). It uses the standard library only.
 
+## A GPU reference, and what the tests catch: Qwen2.5-7B-Instruct
+
+The second reference was run on an NVIDIA L4 with vLLM 0.30.0, as an [OpenResearch](https://github.com/alphaXiv/OpenResearch) experiment tree: one git branch per question, one fixed run command, every number printed to the run log. The harness and the write-ups are in [`reference/gpu/`](reference/gpu/).
+
+The batteries come from published tests, so a result can be compared with the paper it came from:
+
+| | What it compares | After |
+|---|---|---|
+| T0 | prompt-token counts for eight fixed conversations | AgentProv (arXiv 2609.00052) |
+| T1 | one-word answers to 10 trivial questions in 4 languages | One Token Is Enough (arXiv 2607.10252) |
+| T2 | where one endpoint answer ranks among 100 reference answers | RUT (arXiv 2506.06975) |
+| T3 | 50-token continuations of Wikipedia snippets, kernel two-sample test | MET (arXiv 2410.20247) |
+| T4 | random bit and digit strings | IRIS (arXiv 2607.20860) |
+
+**Round 1: which engine makes the reference.** With vLLM's default kernels, 12 of 32 greedy answers changed depending on what else was in the batch. With its batch-invariant kernels, 32 of 32 stayed the same, at 5-8% lower throughput. So the reference is run batch-invariant: anyone with the same stack gets the same reference. A provider won't run that stack, so the reference is still compared as a distribution of answers, not as exact strings.
+
+**Round 2: honest providers against substitutes.** Ten sample sets were collected against the reference. Five are honest variants of the same weights (default kernels, 8 sequences per batch, prefix cache off, CUDA graphs off, fp16). Five are cheaper things a provider could serve instead.
+
+- With a plain p-value, the MET test flags all five honest variants (p = 0.001). Kernel choice alone moves the output distribution enough to be seen. This matches what the literature reports for real providers.
+- With the threshold taken from the honest variants (95th percentile of the statistic, each honest variant judged only against the others), honest variants are flagged 6-10% of the time on average.
+- At that threshold, a 4-bit AWQ copy, Qwen2.5-3B and Qwen2-7B are flagged by every test at every budget down to 5 samples per prompt. Online fp8 (weights and activations) is flagged by T3 95% of the time at 10 samples per prompt.
+- An 8-bit weight-only copy (GPTQ int8) is not flagged by anything. It sits at the honest rate.
+- T0 alone catches an injected provider system prompt and the Qwen2 template, because both change the prompt-token count. Without that gate, the system prompt makes T1-T3 fire as if the model had been swapped.
+- Routing 10% of answers to a different model is caught by T1. Routing to a 4-bit copy needs about 20% before T3 catches it reliably.
+
+The full tables, with run ids, are in [`reference/gpu/round2.md`](reference/gpu/round2.md). This reference is published in the ledger as profile `a8ce6958`: the weights manifest (all 11 files match Hugging Face at `a09a354`), the setup, and one run per battery with its band.
+
+```bash
+cargo run --release --bin tvc -- verify-reference --registry reference/registry.jsonl \
+  --profile a8ce6958e740643c007bae59e0a141750c07146f1ffae20a68c30e8f45c66b2e \
+  --publisher 8f738e4f8e4b3ce2b820dcc9cea88635f0992a56f23eccbc4b5a8d968db421cd
+```
+
+Known limits of this round: one model, one GPU type, one engine, and only five honest variants, so the threshold itself is noisy (the worst honest variant was flagged up to 45% of the time on one test). A literature review of 24 papers behind these choices is in the OpenResearch project; its conclusions are summarised in [`reference/gpu/README.md`](reference/gpu/README.md).
+
 ## What a check proves, and what it doesn't
 
 A passing `verify-reference` means:
@@ -100,7 +135,7 @@ A passing `verify-reference` means:
 
 It doesn't mean:
 - **The setup ran as described.** The engine, version and GPU are the publisher's word. What's fixed is the description, which you can re-run.
-- **The outputs came from the model.** They're what the publisher says the model said. On a pinned stack this run reproduced 12 of 12. Across GPUs and engines, greedy decoding drifts, so third-party re-runs are compared within bands, not byte for byte. A two-GPU determinism test is on the roadmap before anyone should claim more.
+- **The outputs came from the model.** They're what the publisher says the model said. On a pinned stack the 0.5B run reproduced 12 of 12, and the 7B run with batch-invariant kernels 32 of 32. Across GPUs and engines, outputs drift, so third-party re-runs and provider endpoints are compared within bands taken from honest serving variants, not byte for byte.
 - **The Bitcoin block is real.** `verify-anchor` reads the proof and prints the block height and the merkle root it claims. It doesn't fetch blocks. You finish the check on any block explorer.
 - **The key is SPOT's.** A key is 32 bytes. Pin it from somewhere you already trust.
 
@@ -133,7 +168,7 @@ Week 3 turned it around. The party that most needs to prove what it ran is the c
 Roughly in order:
 
 1. SPOT's reference harness emits these documents directly, with bands keyed by catalogue check id (PW-01, ID-06, BH-01 and so on).
-2. A two-GPU determinism test on reference outputs before claiming third parties can reproduce them. Then a second, quantised fingerprint for logprobs, so ID-01 and QZ-01 bands survive cross-GPU noise.
+2. References for the open models OpenRouter resells most (gpt-oss, Gemma 4, Qwen 3.x, Llama 3.3), on more than one GPU type, then the same batteries run against each third-party provider to count how many serve something other than the model they name.
 3. Fiat-Shamir item selection in the check runner, so which committed prompts a check uses is derived from the commitment, the endpoint and the date. `tvc sample` already does the derivation.
 4. Check results in the ledger, signed by the analyst. They'll most likely be recorded as raw signal values with the verdict on top, so a wrong call can be corrected without rewriting history.
 5. Key management: an org key, analyst keys, key rotation records, and the public key published on authenticated.si.
@@ -175,7 +210,8 @@ tvc-cli/src/
   reference.rs     manifest, publish, reveal and verify-reference commands
   hf.rs            the Hugging Face comparison
   anchor.rs        OpenTimestamps submission, parsing and upgrade
-reference/         a real ledger for Qwen2.5-0.5B-Instruct, and its harness
+reference/         the real ledger (Qwen2.5-0.5B and Qwen2.5-7B references)
+reference/gpu/     the GPU harness (vLLM, batteries T0-T4) and its results
 docs/              spec, verify-yourself walkthrough, demo script, earlier README
 ```
 
