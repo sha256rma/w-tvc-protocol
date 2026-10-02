@@ -43,7 +43,8 @@
 //! | [`canonical`] | Canonical JSON and the plain SHA-256 that names a document. |
 //! | [`manifest`] | Per-file SHA-256 manifests of a model directory, and checking a directory against one. |
 //! | [`itemset`] | Salted commitments to secret items, single-item reveals, and Fiat-Shamir selection. |
-//! | [`documents`] | The four reference document kinds, their validation, and the object store. |
+//! | [`documents`] | The reference document kinds (v1, and the v2 battery, honest-set, calibration and audit kinds), their validation, and the object store. |
+//! | [`audit`] | How an audit draws its prompts and reaches its verdict, shared by auditor and verifier. |
 //! | [`commitment`] | Weight loading, quantisation, and `C = Commit(W)`. Split into a scheme layer ([`commitment::VectorCommitment`]) and a protocol layer ([`commitment::WeightCommitment`]). |
 //! | [`signer`] | Publisher keys, registration payloads, document claims, BIP-340 signatures. |
 //! | [`registry`] | The append-only, hash-chained ledger of registrations (v2) and document claims (v3). |
@@ -134,6 +135,7 @@
 
 #![doc(html_root_url = "https://docs.rs/tvc-core/0.2.0")]
 
+pub mod audit;
 pub mod canonical;
 pub mod commitment;
 pub mod digest;

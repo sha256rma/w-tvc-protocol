@@ -18,6 +18,7 @@
 //! with a message naming what failed, so this is usable in a build gate.
 
 mod anchor;
+mod audit;
 mod hf;
 mod reference;
 
@@ -289,6 +290,50 @@ enum Command {
         registry: PathBuf,
     },
 
+    /// Print the prompt indices an audit must draw from a battery.
+    ///
+    /// The indices come from the battery's committed pool and a context built
+    /// from the endpoint, the day the window starts, and the battery, so an
+    /// auditor cannot choose them.
+    AuditDraw {
+        /// Digest of the battery document.
+        #[arg(long)]
+        battery: String,
+        /// The audit's endpoint object, as JSON, exactly as the audit records it.
+        #[arg(long)]
+        endpoint: String,
+        /// Window start, `YYYY-MM-DDTHH:MM:SSZ`.
+        #[arg(long)]
+        start: String,
+        /// Path to the registry ledger.
+        #[arg(long, default_value = "registry.jsonl")]
+        registry: PathBuf,
+    },
+
+    /// Check an audit: its calibration came first, its prompts were not
+    /// picked, and its verdict follows from its numbers.
+    ///
+    /// Exit codes: 0 every check that ran passed; 2 ledger; 3 audit or
+    /// signature; 4 document or reveal; 6 anchor; 7 order; 8 draw; 9 thresholds
+    /// or verdict.
+    VerifyAudit {
+        /// Digest of the audit document.
+        #[arg(long)]
+        audit: String,
+        /// Publisher x-only public key to pin, as 64 hex characters.
+        #[arg(long)]
+        publisher: String,
+        /// A revealed response or prompt (`tvc reveal` output) to open against the audit.
+        #[arg(long)]
+        reveal: Vec<PathBuf>,
+        /// Print the result as JSON.
+        #[arg(long)]
+        json: bool,
+        /// Path to the registry ledger.
+        #[arg(long, default_value = "registry.jsonl")]
+        registry: PathBuf,
+    },
+
     /// Publish and check a reference end to end, offline, then try to cheat it.
     Demo {
         /// Directory to write demo artefacts into.
@@ -315,6 +360,23 @@ fn main() -> ExitCode {
             weights_dir.as_deref(),
             *json,
         ) {
+            Ok(code) => ExitCode::from(code),
+            Err(message) => {
+                eprintln!("error: {message}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
+    if let Command::VerifyAudit {
+        audit,
+        publisher,
+        reveal,
+        json,
+        registry,
+    } = &cli.command
+    {
+        return match audit::verify_audit(registry, audit, publisher, reveal, *json) {
             Ok(code) => ExitCode::from(code),
             Err(message) => {
                 eprintln!("error: {message}");
@@ -393,7 +455,13 @@ fn main() -> ExitCode {
         } => reference::sample(&registry, &run, &set, k, &context),
         Command::Publish { doc, registry } => reference::publish(&doc, &registry),
         Command::Show { digest, registry } => reference::show(&registry, &digest),
-        Command::VerifyReference { .. } => unreachable!("handled above"),
+        Command::VerifyReference { .. } | Command::VerifyAudit { .. } => unreachable!("handled above"),
+        Command::AuditDraw {
+            battery,
+            endpoint,
+            start,
+            registry,
+        } => audit::audit_draw(&registry, &battery, &endpoint, &start),
         Command::Demo { out } => demo(&out),
     };
 
@@ -666,18 +734,85 @@ fn anchor_proof_path(ledger: &Path) -> PathBuf {
     }
 }
 
+/// Directory every anchor proof ever made for `ledger` is kept in, so a later
+/// anchor doesn't erase the evidence that an earlier head existed in time.
+/// Files are named `<covered sequence>-<head prefix>.ots`.
+fn anchors_dir(ledger: &Path) -> PathBuf {
+    match ledger.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.join("anchors"),
+        _ => PathBuf::from("anchors"),
+    }
+}
+
+/// One stored anchor proof and the last ledger record it covers.
+pub(crate) struct StoredAnchor {
+    pub path: PathBuf,
+    pub covered: u64,
+    pub proof: AnchorProof,
+}
+
+/// Every anchor proof stored for `ledger`: `registry.head.ots` and everything
+/// in `anchors/`, each with the last record it covers, oldest first. A proof
+/// that commits to a digest which is not a record of this ledger is skipped.
+pub(crate) fn stored_anchors(ledger: &Path, registry: &ModelRegistry) -> Vec<StoredAnchor> {
+    let digests = record_digests(registry);
+    let mut paths = vec![anchor_proof_path(ledger)];
+    if let Ok(entries) = std::fs::read_dir(anchors_dir(ledger)) {
+        let mut found: Vec<PathBuf> = entries
+            .filter_map(|entry| entry.ok().map(|e| e.path()))
+            .filter(|path| path.extension().is_some_and(|ext| ext == "ots"))
+            .collect();
+        found.sort();
+        paths.extend(found);
+    }
+    let mut anchors: Vec<StoredAnchor> = paths
+        .into_iter()
+        .filter_map(|path| {
+            let proof = AnchorProof::from_file(&path).ok()?;
+            let committed = proof.committed_digest().ok()?;
+            let covered = digests.iter().find(|(_, digest)| digest == &committed)?.0;
+            Some(StoredAnchor { path, covered, proof })
+        })
+        .collect();
+    anchors.sort_by_key(|anchor| anchor.covered);
+    anchors
+}
+
+/// Copies a proof into `anchors/` under its covered sequence, unless one is there.
+pub(crate) fn keep_anchor(ledger: &Path, covered: u64, head: &[u8; 32], proof: &AnchorProof) -> Result<PathBuf, String> {
+    let dir = anchors_dir(ledger);
+    std::fs::create_dir_all(&dir).map_err(|error| format!("{}: {error}", dir.display()))?;
+    let path = dir.join(format!("{covered:06}-{}.ots", &hex::encode(head)[..16]));
+    if !path.exists() {
+        proof.to_file(&path)?;
+    }
+    Ok(path)
+}
+
 fn anchor_ledger(ledger: &Path) -> Result<(), String> {
     let registry = ModelRegistry::open(ledger).map_err(describe)?;
     let head = registry.head();
     let proof_path = anchor_proof_path(ledger);
 
+    // A proof made before anchor history existed lives only in registry.head.ots.
+    // Keep it before that file is overwritten.
+    if let Ok(old) = AnchorProof::from_file(&proof_path) {
+        if let Ok(committed) = old.committed_digest() {
+            if let Some((sequence, _)) = record_digests(&registry).into_iter().find(|(_, d)| d == &committed) {
+                keep_anchor(ledger, sequence, &committed, &old)?;
+            }
+        }
+    }
+
     let proof = OpenTimestampsCalendar::default().stamp(head)?;
     proof.to_file(&proof_path)?;
+    let kept = keep_anchor(ledger, registry.len().saturating_sub(1) as u64, &head, &proof)?;
 
     println!("Submitted the ledger head to the public OpenTimestamps calendar network.");
     println!("  ledger             {}", ledger.display());
     println!("  head               {}", hex::encode(&head));
     println!("  proof              {}", proof_path.display());
+    println!("  kept as            {}", kept.display());
     println!();
     println!("A calendar has recorded this commitment. Until it is folded into a Bitcoin");
     println!("block (usually a few hours), that is the calendar operator's word only.");
@@ -776,6 +911,44 @@ fn verify_anchor(ledger: &Path, offline: bool) -> Result<(), String> {
             println!("{height} on any block explorer and compare its merkle root with the value above.");
             println!("If they match, the anchored head existed no later than that block's time.");
         }
+    }
+    verify_anchor_history(ledger, &registry, offline)
+}
+
+/// Checks, and upgrades where possible, every proof kept in `anchors/`.
+fn verify_anchor_history(ledger: &Path, registry: &ModelRegistry, offline: bool) -> Result<(), String> {
+    let calendar = OpenTimestampsCalendar::default();
+    let kept: Vec<StoredAnchor> = stored_anchors(ledger, registry)
+        .into_iter()
+        .filter(|anchor| anchor.path.starts_with(anchors_dir(ledger)))
+        .collect();
+    if kept.is_empty() {
+        return Ok(());
+    }
+    println!();
+    println!("Anchor history ({}):", anchors_dir(ledger).display());
+    for anchor in kept {
+        let head = anchor.proof.committed_digest()?;
+        let mut proof = anchor.proof;
+        let mut status = if proof.is_null() {
+            NullAnchor.verify(head, &proof)?
+        } else {
+            calendar.verify(head, &proof)?
+        };
+        if matches!(status, AnchorStatus::Pending { .. }) && !offline {
+            if let Some(better) = calendar.upgrade(head, &proof)? {
+                better.to_file(&anchor.path)?;
+                proof = better;
+                status = calendar.verify(head, &proof)?;
+            }
+        }
+        let label = match status {
+            AnchorStatus::Unattested => "offline anchor only".to_owned(),
+            AnchorStatus::Pending { .. } => "pending".to_owned(),
+            AnchorStatus::BitcoinAttested { height, .. } => format!("Bitcoin block {height}"),
+        };
+        let name = anchor.path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+        println!("  records 0 to {:<5}  {:<34}  {label}", anchor.covered, name);
     }
     Ok(())
 }

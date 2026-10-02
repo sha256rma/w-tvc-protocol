@@ -27,11 +27,12 @@ use std::path::Path;
 use serde_json::{json, Value};
 use tvc_core::canonical::canonical_digest;
 use tvc_core::documents::{
-    refs_of, validate_document, ObjectStore, KIND_PROFILE, KIND_REFERENCE_RUN, KIND_REFERENCE_SETUP,
+    refs_of, validate_document, ObjectStore, KIND_PROFILE, KIND_PROFILE_V2, RUN_KINDS,
+    KIND_REFERENCE_RUN_V2,
 };
 use tvc_core::hex;
 use tvc_core::itemset::{select, ItemReveal, ItemSet};
-use tvc_core::manifest::{WeightsManifest, KIND_WEIGHTS_MANIFEST};
+use tvc_core::manifest::WeightsManifest;
 use tvc_core::registry::{DocumentRecord, ModelRegistry};
 use tvc_core::signer::{unix_now, DocumentClaim};
 
@@ -199,7 +200,7 @@ fn run_set(ledger: &Path, run: &[u8; 32], set: &str) -> Result<([u8; 32], u64), 
     let record = registry
         .get_document(run)
         .ok_or_else(|| format!("{} is not a document in {}", hex::encode(run), ledger.display()))?;
-    if record.kind() != KIND_REFERENCE_RUN {
+    if !RUN_KINDS.contains(&record.kind()) {
         return Err(format!("{} is a {}, not a reference run", hex::encode(run), record.kind()));
     }
     let document = ObjectStore::beside(ledger).get(run).map_err(|e| e.to_string())?;
@@ -300,14 +301,14 @@ pub fn show(ledger: &Path, digest: &str) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Status {
+pub(crate) enum Status {
     Pass,
     Fail,
     Skip,
 }
 
 impl Status {
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Pass => "pass",
             Self::Fail => "fail",
@@ -316,16 +317,16 @@ impl Status {
     }
 }
 
-struct Check {
-    name: &'static str,
+pub(crate) struct Check {
+    pub(crate) name: &'static str,
     /// Process exit code when this is the first failing check.
-    exit: u8,
-    status: Status,
-    detail: String,
+    pub(crate) exit: u8,
+    pub(crate) status: Status,
+    pub(crate) detail: String,
 }
 
 impl Check {
-    fn new(name: &'static str, exit: u8) -> Self {
+    pub(crate) fn new(name: &'static str, exit: u8) -> Self {
         Self {
             name,
             exit,
@@ -334,19 +335,19 @@ impl Check {
         }
     }
 
-    fn fail(&mut self, detail: impl Into<String>) {
+    pub(crate) fn fail(&mut self, detail: impl Into<String>) {
         if self.status != Status::Fail {
             self.status = Status::Fail;
             self.detail = detail.into();
         }
     }
 
-    fn skip(&mut self, detail: impl Into<String>) {
+    pub(crate) fn skip(&mut self, detail: impl Into<String>) {
         self.status = Status::Skip;
         self.detail = detail.into();
     }
 
-    fn pass(&mut self, detail: impl Into<String>) {
+    pub(crate) fn pass(&mut self, detail: impl Into<String>) {
         if self.status == Status::Pass {
             self.detail = detail.into();
         }
@@ -365,6 +366,71 @@ pub mod exit {
     pub const WEIGHTS: u8 = 5;
     /// The anchor proof does not cover this profile.
     pub const ANCHOR: u8 = 6;
+    /// A document an audit relies on was published after the audit.
+    pub const ORDER: u8 = 7;
+    /// An audit's prompt draw does not re-derive from the committed pool.
+    pub const DRAW: u8 = 8;
+    /// An audit's thresholds or verdict do not follow from its calibration.
+    pub const VERDICT: u8 = 9;
+}
+
+/// Every document `start` depends on through the ledger's signed claims,
+/// `start` first, each with its stored object (`None` if it could not be read).
+/// Objects that fail to load are reported through `objects`.
+pub(crate) fn closure(
+    registry: &ModelRegistry,
+    store: &ObjectStore,
+    start: [u8; 32],
+    objects: &mut Check,
+) -> Vec<(DocumentRecord, Option<Value>)> {
+    let mut out = Vec::new();
+    let mut queue = VecDeque::from([start]);
+    let mut seen = BTreeSet::new();
+    while let Some(digest) = queue.pop_front() {
+        if !seen.insert(digest) {
+            continue;
+        }
+        let Some(record) = registry.get_document(&digest) else {
+            continue;
+        };
+        queue.extend(record.signed.claim.refs.iter().copied());
+        let document = store.get(&digest).map_err(|e| e.to_string());
+        if let Err(error) = &document {
+            objects.fail(format!("{}: {error}", &hex::encode(&digest)[..16]));
+        }
+        out.push((record.clone(), document.ok()));
+    }
+    out
+}
+
+/// Signature, shape and claim-consistency checks over a closure.
+pub(crate) fn check_closure(
+    registry: &ModelRegistry,
+    closure: &[(DocumentRecord, Option<Value>)],
+    publisher: &[u8; 32],
+    signed: &mut Check,
+    formed: &mut Check,
+    consistent: &mut Check,
+) {
+    let kind_of = |d: &[u8; 32]| registry.get_document(d).map(|r| r.kind().to_owned());
+    for (record, document) in closure {
+        let short = &record.digest_hex()[..16];
+        if let Err(error) = record.signed.verify_signed_by(publisher) {
+            signed.fail(format!("{} ({}): {error}", record.kind(), short));
+        }
+        let Some(document) = document else { continue };
+        if let Err(error) = validate_document(record.kind(), document, &kind_of) {
+            formed.fail(error.to_string());
+        }
+        match refs_of(record.kind(), document) {
+            Ok(refs) if refs == record.signed.claim.refs => {}
+            Ok(_) => consistent.fail(format!(
+                "the {} document cites different documents than its signed claim",
+                record.kind()
+            )),
+            Err(error) => consistent.fail(error.to_string()),
+        }
+    }
 }
 
 /// `tvc verify-reference`. Returns the process exit code.
@@ -402,7 +468,7 @@ pub fn verify_reference(
     let mut closure: Vec<(DocumentRecord, Option<Value>)> = Vec::new();
     if let Some(registry) = &registry {
         match registry.get_document(&profile) {
-            Some(record) if record.kind() == KIND_PROFILE => {
+            Some(record) if record.kind() == KIND_PROFILE || record.kind() == KIND_PROFILE_V2 => {
                 in_ledger.pass(format!("sequence {}", record.sequence));
             }
             Some(record) => in_ledger.fail(format!("it is a {}, not a profile", record.kind())),
@@ -411,42 +477,8 @@ pub fn verify_reference(
 
         // Every document the profile depends on, through the ledger's claims.
         let store = ObjectStore::beside(ledger);
-        let mut queue = VecDeque::from([profile]);
-        let mut seen = BTreeSet::new();
-        while let Some(digest) = queue.pop_front() {
-            if !seen.insert(digest) {
-                continue;
-            }
-            let Some(record) = registry.get_document(&digest) else {
-                continue;
-            };
-            queue.extend(record.signed.claim.refs.iter().copied());
-            let document = store.get(&digest).map_err(|e| e.to_string());
-            if let Err(error) = &document {
-                objects.fail(format!("{}: {error}", &hex::encode(&digest)[..16]));
-            }
-            closure.push((record.clone(), document.ok()));
-        }
-
-        let kind_of = |d: &[u8; 32]| registry.get_document(d).map(|r| r.kind().to_owned());
-        for (record, document) in &closure {
-            let short = &record.digest_hex()[..16];
-            if let Err(error) = record.signed.verify_signed_by(&publisher) {
-                signed.fail(format!("{} ({}): {error}", record.kind(), short));
-            }
-            let Some(document) = document else { continue };
-            if let Err(error) = validate_document(record.kind(), document, &kind_of) {
-                formed.fail(error.to_string());
-            }
-            match refs_of(record.kind(), document) {
-                Ok(refs) if refs == record.signed.claim.refs => {}
-                Ok(_) => consistent.fail(format!(
-                    "the {} document cites different documents than its signed claim",
-                    record.kind()
-                )),
-                Err(error) => consistent.fail(error.to_string()),
-            }
-        }
+        closure.extend(self::closure(registry, &store, profile, &mut objects));
+        check_closure(registry, &closure, &publisher, &mut signed, &mut formed, &mut consistent);
         let count = closure.len();
         let loaded = closure.iter().filter(|(_, document)| document.is_some()).count();
         signed.pass(format!("{count} documents, all signed by {}", &hex::encode(&publisher)[..16]));
@@ -455,29 +487,80 @@ pub fn verify_reference(
         consistent.pass(format!("{loaded} of {count} documents could be read and checked"));
 
         // Each run's setup must describe the same weights the profile names.
-        let find = |kind: &str| -> Vec<&Value> {
-            closure
-                .iter()
-                .filter(|(record, _)| record.kind() == kind)
-                .filter_map(|(_, document)| document.as_ref())
-                .collect()
+        // That means the profile's own runs and its honest set. A calibration
+        // also cites substitute runs, which ran other weights on purpose.
+        let by_digest: std::collections::BTreeMap<[u8; 32], &Value> = closure
+            .iter()
+            .filter_map(|(record, document)| document.as_ref().map(|d| (record.document(), d)))
+            .collect();
+        let get = |value: &Value| -> Option<&Value> {
+            hex::decode_array::<32>(value.as_str()?).ok().and_then(|d| by_digest.get(&d).copied())
         };
-        let profile_weights = find(KIND_PROFILE)
-            .first()
-            .and_then(|p| p["weights"].as_str())
-            .map(str::to_owned);
-        let setups = find(KIND_REFERENCE_SETUP);
-        let mismatched = setups
+        let profile_document = by_digest.get(&profile).copied();
+        let profile_weights = profile_document.and_then(|p| p["weights"].as_str()).map(str::to_owned);
+        let mut own_runs: Vec<&Value> = profile_document
+            .and_then(|p| p["runs"].as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(get)
+            .collect();
+        let honest_set = profile_document.and_then(|p| p.get("honest_set")).and_then(get);
+        let mut own_setups: Vec<&Value> = Vec::new();
+        if let Some(set) = honest_set {
+            own_runs.extend(get(&set["reference_run"]));
+            for member in set["members"].as_array().into_iter().flatten() {
+                own_runs.extend(get(&member["run"]));
+                own_setups.extend(get(&member["setup"]));
+            }
+        }
+        own_setups.extend(own_runs.iter().filter_map(|run| get(&run["setup"])));
+        own_setups.sort_by_key(|setup| std::ptr::from_ref::<Value>(setup) as usize);
+        own_setups.dedup_by(|a, b| std::ptr::eq(*a, *b));
+        let mismatched = own_setups
             .iter()
             .filter(|setup| setup["weights"].as_str().map(str::to_owned) != profile_weights)
             .count();
         if mismatched > 0 {
             same_weights.fail(format!("{mismatched} setup(s) ran different weights than the profile names"));
         } else {
-            same_weights.pass(format!("{} setup(s), one weights manifest", setups.len()));
+            same_weights.pass(format!("{} setup(s), one weights manifest", own_setups.len()));
         }
 
-        match (weights_dir, find(KIND_WEIGHTS_MANIFEST).first()) {
+        // v2: a run's prompts are its battery's pool; a full profile has the
+        // honest set and measured power its maturity promises.
+        if profile_document.is_some_and(|p| p["kind"] == KIND_PROFILE_V2) {
+            for run in own_runs.iter().filter(|run| run["kind"] == KIND_REFERENCE_RUN_V2) {
+                match get(&run["battery"]) {
+                    Some(battery) if battery["pool"]["root"] == run["prompts"]["root"] => {}
+                    Some(_) if run["prompts_subset_of_pool"] == Value::Bool(true) => {}
+                    Some(battery) => formed.fail(format!(
+                        "a {} run's prompts are not its battery's committed pool",
+                        battery["id"].as_str().unwrap_or("?")
+                    )),
+                    None => formed.fail("a v2 run's battery could not be read"),
+                }
+            }
+            if profile_document.is_some_and(|p| p["maturity"] == "full") {
+                let members = honest_set.and_then(|s| s["members"].as_array()).map_or(0, Vec::len);
+                let substitutes: BTreeSet<&str> = profile_document
+                    .and_then(|p| p["calibrations"].as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(get)
+                    .flat_map(|c| c["entries"].as_array().into_iter().flatten())
+                    .flat_map(|e| e["power"].as_array().into_iter().flatten())
+                    .filter_map(|p| p["against"].as_str())
+                    .collect();
+                if members < 4 || substitutes.len() < 2 {
+                    formed.fail(format!(
+                        "a full profile needs an honest set of at least 4 and power against at least 2 runs; it has {members} and {}",
+                        substitutes.len()
+                    ));
+                }
+            }
+        }
+        let profile_manifest = profile_document.and_then(|p| get(&p["weights"]));
+        match (weights_dir, profile_manifest) {
             (None, _) => on_disk.skip("no --weights-dir given"),
             (Some(_), None) => on_disk.fail("the profile has no weights manifest"),
             (Some(dir), Some(document)) => match WeightsManifest::from_json(document)
