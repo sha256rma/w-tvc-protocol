@@ -280,7 +280,7 @@ footer { color: var(--muted); font-size: 0.82rem; }
   } else {
     const cal = an.evidence.filter(e => e.tag === "calibrated");
     const verdicts = Object.fromEntries(an.evidence.filter(e => e.tag === "verdict").map(v => [v.candidate, v]));
-    const settings = [...new Set(cal.filter(e => e.setting.startsWith("k=")).map(e => e.setting))];
+    const settings = [...new Set(cal.filter(e => e.setting.startsWith("k=")).map(e => e.setting))].sort((a, b) => +a.slice(2) - +b.slice(2));
     const tests = ["t1", "t2", "t3", "t4"];
     const cands = [...new Set(cal.map(e => e.candidate))];
     let t = "<thead><tr><th>Sample set</th><th>Role</th><th>T0</th>" + tests.map(x => `<th class="check">${x.toUpperCase()}<span class="sub">${x === "t2" ? "1 per prompt" : esc(settings.join(" · "))}</span></th>`).join("") + "</tr></thead><tbody>";
@@ -289,7 +289,8 @@ footer { color: var(--muted); font-size: 0.82rem; }
       const v = verdicts[cand] || {};
       t += `<tr><td class="model">${esc(cand)}</td><td>${pill(role === "honest" ? "yes" : "planned", role)}</td><td>${v.t0 ? pill(v.t0 === "matches" ? "yes" : "no", v.t0) : ""}</td>`;
       for (const x of tests) {
-        const rows = cal.filter(e => e.candidate === cand && e.test === x && (x === "t2" || e.setting.startsWith("k=")));
+        const pick = s => cal.find(e => e.candidate === cand && e.test === x && e.setting === s);
+        const rows = (x === "t2" ? ["one-per-prompt"] : settings).map(pick).filter(Boolean);
         t += `<td class="c num">${rows.map(e => e.rejection_rate.toFixed(2)).join(" · ") || "–"}</td>`;
       }
       t += "</tr>";

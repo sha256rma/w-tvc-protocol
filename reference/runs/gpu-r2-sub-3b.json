@@ -1,10 +1,10 @@
 {
  "kind": "gpu-run",
- "run_id": "dedfdbab-8b7e-4bdb-8d39-2647aad1dc7f",
+ "run_id": "277371a6-c208-4359-a7ef-310268affd67",
  "status": "done",
- "experiment": "R2 Honest null: prefix caching off",
- "commit": "972aadd",
- "name": "r2-null-noprefix",
+ "experiment": "R2 Substitute: Qwen2.5-3B-Instruct",
+ "commit": "03036c9",
+ "name": "r2-sub-3b",
  "mode": "collect",
  "evidence": [
   {
@@ -66,16 +66,16 @@
     "gpu_memory_utilization": 0.9,
     "max_model_len": 4096,
     "max_num_seqs": 256,
-    "prefix_caching": false,
+    "prefix_caching": true,
     "quantization": null,
     "seed": 0
    },
    "mode": "collect",
    "model": {
-    "repo": "Qwen/Qwen2.5-7B-Instruct",
-    "revision": "a09a35458c702b33eeacc393d103063234e8bc28"
+    "repo": "Qwen/Qwen2.5-3B-Instruct",
+    "revision": "aa8e72537993ba99e69dfaafa59ed015b17504d1"
    },
-   "name": "r2-null-noprefix",
+   "name": "r2-sub-3b",
    "tag": "config"
   },
   {
@@ -90,48 +90,48 @@
     44,
     229
    ],
-   "seconds": 0.25,
+   "seconds": 0.11,
    "tag": "t0"
   },
   {
-   "completion_tokens": 23751,
-   "completion_tokens_per_s": 232.9,
+   "completion_tokens": 23772,
+   "completion_tokens_per_s": 1552.3,
    "prompt_tokens": 3576,
    "prompts": 40,
    "samples": 8000,
-   "seconds": 101.98,
+   "seconds": 15.31,
    "tag": "t1"
   },
   {
    "completion_tokens": 30000,
-   "completion_tokens_per_s": 1071.1,
+   "completion_tokens_per_s": 4072.9,
    "prompt_tokens": 5743,
    "prompts": 100,
    "samples": 1000,
-   "seconds": 28.01,
+   "seconds": 7.37,
    "tag": "t2"
   },
   {
-   "completion_tokens": 233722,
-   "completion_tokens_per_s": 1047.8,
+   "completion_tokens": 205289,
+   "completion_tokens_per_s": 3407.2,
    "prompt_tokens": 8144,
    "prompts": 25,
    "samples": 5000,
-   "seconds": 223.06,
+   "seconds": 60.25,
    "tag": "t3"
   },
   {
-   "completion_tokens": 7918,
-   "completion_tokens_per_s": 416.8,
+   "completion_tokens": 8344,
+   "completion_tokens_per_s": 1128.0,
    "prompt_tokens": 1072,
    "prompts": 5,
    "samples": 1000,
-   "seconds": 19.0,
+   "seconds": 7.4,
    "tag": "t4"
   },
   {
-   "engine_ready_s": 70.0,
-   "peak_gpu_mib": 21662,
+   "engine_ready_s": 144.1,
+   "peak_gpu_mib": 19996,
    "t0": {
     "items": 8,
     "prompt_tokens": [
@@ -144,73 +144,73 @@
      44,
      229
     ],
-    "seconds": 0.25
+    "seconds": 0.11
    },
    "t1": {
-    "completion_tokens": 23751,
-    "completion_tokens_per_s": 232.9,
+    "completion_tokens": 23772,
+    "completion_tokens_per_s": 1552.3,
     "prompt_tokens": 3576,
     "prompts": 40,
     "samples": 8000,
-    "seconds": 101.98
+    "seconds": 15.31
    },
    "t2": {
     "completion_tokens": 30000,
-    "completion_tokens_per_s": 1071.1,
+    "completion_tokens_per_s": 4072.9,
     "prompt_tokens": 5743,
     "prompts": 100,
     "samples": 1000,
-    "seconds": 28.01
+    "seconds": 7.37
    },
    "t3": {
-    "completion_tokens": 233722,
-    "completion_tokens_per_s": 1047.8,
+    "completion_tokens": 205289,
+    "completion_tokens_per_s": 3407.2,
     "prompt_tokens": 8144,
     "prompts": 25,
     "samples": 5000,
-    "seconds": 223.06
+    "seconds": 60.25
    },
    "t4": {
-    "completion_tokens": 7918,
-    "completion_tokens_per_s": 416.8,
+    "completion_tokens": 8344,
+    "completion_tokens_per_s": 1128.0,
     "prompt_tokens": 1072,
     "prompts": 5,
     "samples": 1000,
-    "seconds": 19.0
+    "seconds": 7.4
    },
    "tag": "collect_summary",
-   "wall_s": 443.4
+   "wall_s": 235.5
   },
   {
-   "null_mean": 0.07585,
-   "null_q95": 0.07965,
-   "p": 0.8831,
+   "null_mean": 0.11594,
+   "null_q95": 0.12052,
+   "p": 0.4935,
    "prompts": 40,
-   "statistic": 0.07316,
+   "statistic": 0.11593,
    "tag": "self_t1"
   },
   {
    "met_check": {
-    "ours": -3.9e-05,
-    "package": -3.9e-05
+    "ours": 0.000424,
+    "package": 0.000424
    },
-   "null_mean": -0.0,
-   "null_q95": 0.000191,
-   "p": 0.5844,
+   "null_mean": 4e-06,
+   "null_q95": 0.000319,
+   "p": 0.4476,
    "prompts": 25,
-   "statistic": -2.9e-05,
+   "statistic": 2e-05,
    "tag": "self_t3"
   },
   {
    "met_check": {
-    "ours": -3.4e-05,
-    "package": -3.4e-05
+    "ours": -1.8e-05,
+    "package": -1.8e-05
    },
-   "null_mean": 1e-06,
-   "null_q95": 3.6e-05,
-   "p": 0.3896,
+   "null_mean": -0.0,
+   "null_q95": 3e-05,
+   "p": 0.5634,
    "prompts": 5,
-   "statistic": 2e-06,
+   "statistic": -5e-06,
    "tag": "self_t4"
   }
  ]
