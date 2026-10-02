@@ -1,0 +1,208 @@
+{
+ "kind": "gpu-run",
+ "run_id": "99d7669f-6385-49d6-a74e-104fb885eed5",
+ "status": "cancelled",
+ "experiment": "R1a: Qwen2.5-7B reference, default vLLM kernels",
+ "commit": "5c1feea",
+ "name": "r1a-qwen7b-default",
+ "mode": "collect",
+ "evidence": [
+  {
+   "gpu": "NVIDIA L4, 580.173.02, 23034 MiB, 8.9",
+   "numpy": "2.3.5",
+   "python": "3.12.3",
+   "tag": "environment",
+   "torch": "2.13.0",
+   "transformers": "5.18.0",
+   "vllm": "0.30.0"
+  },
+  {
+   "analysis": {
+    "permutations": 1000
+   },
+   "batteries": {
+    "det": {
+     "max_tokens": 64,
+     "prompts": "det-v1.json"
+    },
+    "t0": {
+     "prompts": "t0-v1.json"
+    },
+    "t1": {
+     "chunk": 100,
+     "max_tokens": 16,
+     "prompts": "t1-v2.json",
+     "samples_per_prompt": 200,
+     "temperature": 1.0
+    },
+    "t2": {
+     "chunk": 50,
+     "max_tokens": 30,
+     "prompts": "t2-v1.json",
+     "samples_per_prompt": 100,
+     "self_score": true,
+     "temperature": 0.5
+    },
+    "t3": {
+     "chars": 1000,
+     "chunk": 50,
+     "max_tokens": 50,
+     "prompts": "t3-v2.json",
+     "samples_per_prompt": 400,
+     "temperature": 1.0
+    },
+    "t4": {
+     "chars": 1000,
+     "chunk": 50,
+     "max_tokens": 88,
+     "prompts": "t4-v1.json",
+     "samples_per_prompt": 400,
+     "temperature": 1.0
+    }
+   },
+   "client": {
+    "concurrency": 64,
+    "system_prompt": null
+   },
+   "engine": {
+    "batch_invariant": false,
+    "dtype": "bfloat16",
+    "gpu_memory_utilization": 0.9,
+    "max_model_len": 4096,
+    "max_num_seqs": 256,
+    "prefix_caching": true,
+    "seed": 0
+   },
+   "mode": "collect",
+   "model": {
+    "repo": "Qwen/Qwen2.5-7B-Instruct",
+    "revision": "a09a35458c702b33eeacc393d103063234e8bc28"
+   },
+   "name": "r1a-qwen7b-default",
+   "tag": "config"
+  },
+  {
+   "items": 8,
+   "prompt_tokens": [
+    30,
+    24,
+    55,
+    49,
+    35,
+    47,
+    44,
+    229
+   ],
+   "seconds": 0.23,
+   "tag": "t0"
+  },
+  {
+   "identical": 20,
+   "prompts": 32,
+   "seconds": 120.48,
+   "tag": "det"
+  },
+  {
+   "completion_tokens": 23514,
+   "completion_tokens_per_s": 694.4,
+   "prompt_tokens": 3576,
+   "prompts": 40,
+   "samples": 8000,
+   "seconds": 33.86,
+   "tag": "t1"
+  },
+  {
+   "completion_tokens": 300000,
+   "completion_tokens_per_s": 1933.9,
+   "prompt_tokens": 11486,
+   "prompts": 100,
+   "samples": 10000,
+   "seconds": 155.13,
+   "tag": "t2"
+  },
+  {
+   "completion_tokens": 467017,
+   "completion_tokens_per_s": 1723.6,
+   "prompt_tokens": 16288,
+   "prompts": 25,
+   "samples": 10000,
+   "seconds": 270.96,
+   "tag": "t3"
+  },
+  {
+   "completion_tokens": 15850,
+   "completion_tokens_per_s": 1068.4,
+   "prompt_tokens": 2144,
+   "prompts": 5,
+   "samples": 2000,
+   "seconds": 14.84,
+   "tag": "t4"
+  },
+  {
+   "det": {
+    "identical": 20,
+    "prompts": 32,
+    "seconds": 120.48
+   },
+   "engine_ready_s": 224.1,
+   "peak_gpu_mib": 19512,
+   "t0": {
+    "items": 8,
+    "prompt_tokens": [
+     30,
+     24,
+     55,
+     49,
+     35,
+     47,
+     44,
+     229
+    ],
+    "seconds": 0.23
+   },
+   "t1": {
+    "completion_tokens": 23514,
+    "completion_tokens_per_s": 694.4,
+    "prompt_tokens": 3576,
+    "prompts": 40,
+    "samples": 8000,
+    "seconds": 33.86
+   },
+   "t2": {
+    "completion_tokens": 300000,
+    "completion_tokens_per_s": 1933.9,
+    "prompt_tokens": 11486,
+    "prompts": 100,
+    "samples": 10000,
+    "seconds": 155.13
+   },
+   "t2_scoring_s": 259.0,
+   "t3": {
+    "completion_tokens": 467017,
+    "completion_tokens_per_s": 1723.6,
+    "prompt_tokens": 16288,
+    "prompts": 25,
+    "samples": 10000,
+    "seconds": 270.96
+   },
+   "t4": {
+    "completion_tokens": 15850,
+    "completion_tokens_per_s": 1068.4,
+    "prompt_tokens": 2144,
+    "prompts": 5,
+    "samples": 2000,
+    "seconds": 14.84
+   },
+   "tag": "collect_summary",
+   "wall_s": 1079.7
+  },
+  {
+   "null_mean": 0.07511,
+   "null_q95": 0.07888,
+   "p": 0.7512,
+   "prompts": 40,
+   "statistic": 0.07355,
+   "tag": "self_t1"
+  }
+ ]
+}

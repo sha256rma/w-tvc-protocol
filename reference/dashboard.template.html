@@ -114,6 +114,18 @@ footer { color: var(--muted); font-size: 0.82rem; }
   </section>
 
   <section>
+    <h2>GPU reference runs</h2>
+    <p class="lede">Each row is one node of the OpenResearch experiment tree, run on one NVIDIA L4 with vLLM. <code>det</code> is how many of 32 greedy answers came out the same alone and inside a full batch. The p-values are self-checks: two random halves of the same samples, which should not look different (large p is good).</p>
+    <div class="scroll"><table id="gpu"></table></div>
+  </section>
+
+  <section>
+    <h2>Honest providers vs substitutes</h2>
+    <p class="lede">How often each test flags a sample set against the batch-invariant reference, with the threshold set at the 95th percentile of the declared honest set (each honest member judged only against the others). Honest rows should be near 0; substitute rows should be near 1. Columns are samples per prompt.</p>
+    <div class="scroll"><table id="calib"></table></div>
+  </section>
+
+  <section>
     <h2>Runs</h2>
     <div class="scroll"><table id="runs"></table></div>
   </section>
@@ -169,7 +181,7 @@ footer { color: var(--muted); font-size: 0.82rem; }
   const measured = (pw ? pw.models : []).filter(m => m.status === "measured").length;
   const blocked = (pw ? pw.models : []).filter(m => m.status === "blocked").length;
   const authored = plan.batteries.filter(b => b.status === "authored").length;
-  const gpuRuns = Object.values(runs).filter(r => /L4|T4|GPU/.test(r.machine || "") && !/no GPU|CPU only/.test(r.machine || "")).length;
+  const gpuRuns = Object.values(runs).filter(r => r.kind === "gpu-run" || (/L4|T4|GPU/.test(r.machine || "") && !/no GPU|CPU only/.test(r.machine || ""))).length;
   const tiles = [
     [plan.models.length, "models in the plan"],
     [`${measured} / ${blocked}`, "PW-01 measured / blocked"],
@@ -234,6 +246,7 @@ footer { color: var(--muted); font-size: 0.82rem; }
   // Runs.
   let rr = "<thead><tr><th>Run</th><th>Machine</th><th>Scope</th><th>Wall time</th><th>Prompt tok</th><th>Completion tok</th><th>Tok/s</th><th>Determinism</th></tr></thead><tbody>";
   for (const [id, r] of Object.entries(runs)) {
+    if (r.kind === "gpu-run") continue;
     if (r.models) {
       const ms = r.models.filter(x => x.status === "measured");
       const t = ms.reduce((a, x) => a + x.fetch_s + x.encode_s, 0);
@@ -244,6 +257,45 @@ footer { color: var(--muted); font-size: 0.82rem; }
     }
   }
   document.getElementById("runs").innerHTML = rr + "</tbody>";
+
+  // GPU runs, straight from the EVIDENCE lines of each run log.
+  const gpu = Object.values(runs).filter(r => r.kind === "gpu-run").sort((a, b) => a.name.localeCompare(b.name));
+  const ev = (r, tag) => r.evidence.find(e => e.tag === tag);
+  const pv = e => e ? e.p.toFixed(2) : "–";
+  let g = "<thead><tr><th>Node</th><th>Model and engine</th><th>Status</th><th>det</th><th>T3 tok/s</th><th>Wall</th><th>Peak GPU</th><th>Self T1</th><th>Self T2</th><th>Self T3</th><th>Self T4</th></tr></thead><tbody>";
+  for (const r of gpu.filter(r => r.mode === "collect")) {
+    const c = ev(r, "config") || {}, s = ev(r, "collect_summary") || {}, e = c.engine || {}, cl = c.client || {};
+    const eng = [e.dtype, e.batch_invariant ? "batch-invariant" : "default kernels", e.quantization, e.prefix_caching === false ? "no prefix cache" : "", e.enforce_eager ? "eager" : "", e.max_num_seqs && e.max_num_seqs < 256 ? "≤" + e.max_num_seqs + " seqs" : "", cl.system_prompt ? "system prompt" : ""].filter(Boolean).join(" · ");
+    const det = s.det ? `${s.det.identical}/${s.det.prompts}` : "–";
+    g += `<tr><td class="model">${esc(r.name)}<span class="sub">run ${esc(r.run_id.slice(0, 8))} · ${esc(r.commit)}</span></td><td>${esc((c.model || {}).repo)}<span class="sub">${esc(eng)}</span></td><td>${pill(r.status === "done" ? "measured" : r.status === "running" ? "planned" : "notrun", r.status)}</td>`;
+    g += `<td class="c num">${det}</td><td class="r num">${s.t3 ? s.t3.completion_tokens_per_s : "–"}</td><td class="r num">${s.wall_s != null ? Math.round(s.wall_s) + " s" : "–"}</td><td class="r num">${s.peak_gpu_mib ? (s.peak_gpu_mib / 1024).toFixed(1) + " GB" : "–"}</td>`;
+    g += `<td class="c num">${pv(ev(r, "self_t1"))}</td><td class="c num">${pv(ev(r, "self_t2"))}</td><td class="c num">${pv(ev(r, "self_t3"))}</td><td class="c num">${pv(ev(r, "self_t4"))}</td></tr>`;
+  }
+  document.getElementById("gpu").innerHTML = g + "</tbody>";
+
+  // Calibrated rejection rates from the analysis node.
+  const an = gpu.find(r => r.mode === "analyze");
+  if (!an) {
+    document.getElementById("calib").innerHTML = `<tbody><tr><td>${pill("planned", "pending")} The analysis node runs after round 2.</td></tr></tbody>`;
+  } else {
+    const cal = an.evidence.filter(e => e.tag === "calibrated");
+    const verdicts = Object.fromEntries(an.evidence.filter(e => e.tag === "verdict").map(v => [v.candidate, v]));
+    const settings = [...new Set(cal.filter(e => e.setting.startsWith("k=")).map(e => e.setting))];
+    const tests = ["t1", "t2", "t3", "t4"];
+    const cands = [...new Set(cal.map(e => e.candidate))];
+    let t = "<thead><tr><th>Sample set</th><th>Role</th><th>T0</th>" + tests.map(x => `<th class="check">${x.toUpperCase()}<span class="sub">${x === "t2" ? "1 per prompt" : esc(settings.join(" · "))}</span></th>`).join("") + "</tr></thead><tbody>";
+    for (const cand of cands) {
+      const role = (cal.find(e => e.candidate === cand) || {}).role;
+      const v = verdicts[cand] || {};
+      t += `<tr><td class="model">${esc(cand)}</td><td>${pill(role === "honest" ? "yes" : "planned", role)}</td><td>${v.t0 ? pill(v.t0 === "matches" ? "yes" : "no", v.t0) : ""}</td>`;
+      for (const x of tests) {
+        const rows = cal.filter(e => e.candidate === cand && e.test === x && (x === "t2" || e.setting.startsWith("k=")));
+        t += `<td class="c num">${rows.map(e => e.rejection_rate.toFixed(2)).join(" · ") || "–"}</td>`;
+      }
+      t += "</tr>";
+    }
+    document.getElementById("calib").innerHTML = t + "</tbody>";
+  }
 
   // Metric definitions.
   const titles = { reference_run: "Each reference run", validation: "Each test, on each pair", endpoint_check: "Each check of a provider endpoint" };
@@ -256,7 +308,7 @@ footer { color: var(--muted); font-size: 0.82rem; }
   document.getElementById("blockers").innerHTML = [
     `${gated.length} gated models (${gated.join(", ")}) need a Hugging Face token with each licence accepted.`,
     `${toWrite.length} batteries aren't written yet: ${toWrite.join(", ")}. The sealed ones are written privately and committed by root.`,
-    "No GPU run yet. Everything except PW-01 needs one; the L4 fits every model in this plan at 16 bits.",
+    "GPU runs so far cover Qwen2.5-7B only (reference, honest variants, substitutes). Every other model in the plan still needs its own reference.",
     "Cross-GPU agreement on a T4 only works for models up to about 3B, and in fp16 on both GPUs, because the T4 has no bf16 and 16 GB of memory.",
     "Qwen2.5-3B-Instruct is under the Qwen research licence; check it before using its reference commercially.",
   ].map(s => `<li>${esc(s)}</li>`).join("");

@@ -1,0 +1,217 @@
+{
+ "kind": "gpu-run",
+ "run_id": "44cd06f3-b2f9-4796-8ae2-ae8da2c00a21",
+ "status": "done",
+ "experiment": "R2 Substitute: Qwen2.5-7B-Instruct-GPTQ-Int8 (8-bit)",
+ "commit": "9bd6f3d",
+ "name": "r2-sub-gptq8",
+ "mode": "collect",
+ "evidence": [
+  {
+   "gpu": "NVIDIA L4, 580.173.02, 23034 MiB, 8.9",
+   "numpy": "2.3.5",
+   "python": "3.12.3",
+   "tag": "environment",
+   "torch": "2.13.0",
+   "transformers": "5.18.0",
+   "vllm": "0.30.0"
+  },
+  {
+   "analysis": {
+    "permutations": 1000
+   },
+   "batteries": {
+    "t0": {
+     "prompts": "t0-v1.json"
+    },
+    "t1": {
+     "chunk": 100,
+     "max_tokens": 16,
+     "prompts": "t1-v2.json",
+     "samples_per_prompt": 200,
+     "temperature": 1.0
+    },
+    "t2": {
+     "chunk": 10,
+     "max_tokens": 30,
+     "prompts": "t2-v1.json",
+     "samples_per_prompt": 10,
+     "temperature": 0.5
+    },
+    "t3": {
+     "chars": 1000,
+     "chunk": 50,
+     "max_tokens": 50,
+     "prompts": "t3-v2.json",
+     "samples_per_prompt": 200,
+     "temperature": 1.0
+    },
+    "t4": {
+     "chars": 1000,
+     "chunk": 50,
+     "max_tokens": 88,
+     "prompts": "t4-v1.json",
+     "samples_per_prompt": 200,
+     "temperature": 1.0
+    }
+   },
+   "client": {
+    "concurrency": 64,
+    "system_prompt": null
+   },
+   "engine": {
+    "batch_invariant": false,
+    "dtype": "float16",
+    "enforce_eager": false,
+    "gpu_memory_utilization": 0.9,
+    "max_model_len": 4096,
+    "max_num_seqs": 256,
+    "prefix_caching": true,
+    "quantization": null,
+    "seed": 0
+   },
+   "mode": "collect",
+   "model": {
+    "repo": "Qwen/Qwen2.5-7B-Instruct-GPTQ-Int8",
+    "revision": "6711f2b6fc95545efe6018c469eca6832e28cefd"
+   },
+   "name": "r2-sub-gptq8",
+   "tag": "config"
+  },
+  {
+   "items": 8,
+   "prompt_tokens": [
+    30,
+    24,
+    55,
+    49,
+    35,
+    47,
+    44,
+    229
+   ],
+   "seconds": 0.26,
+   "tag": "t0"
+  },
+  {
+   "completion_tokens": 23759,
+   "completion_tokens_per_s": 507.9,
+   "prompt_tokens": 3576,
+   "prompts": 40,
+   "samples": 8000,
+   "seconds": 46.78,
+   "tag": "t1"
+  },
+  {
+   "completion_tokens": 30000,
+   "completion_tokens_per_s": 1536.9,
+   "prompt_tokens": 5743,
+   "prompts": 100,
+   "samples": 1000,
+   "seconds": 19.52,
+   "tag": "t2"
+  },
+  {
+   "completion_tokens": 233157,
+   "completion_tokens_per_s": 1455.1,
+   "prompt_tokens": 8144,
+   "prompts": 25,
+   "samples": 5000,
+   "seconds": 160.24,
+   "tag": "t3"
+  },
+  {
+   "completion_tokens": 7990,
+   "completion_tokens_per_s": 1048.3,
+   "prompt_tokens": 1072,
+   "prompts": 5,
+   "samples": 1000,
+   "seconds": 7.62,
+   "tag": "t4"
+  },
+  {
+   "engine_ready_s": 188.1,
+   "peak_gpu_mib": 20248,
+   "t0": {
+    "items": 8,
+    "prompt_tokens": [
+     30,
+     24,
+     55,
+     49,
+     35,
+     47,
+     44,
+     229
+    ],
+    "seconds": 0.26
+   },
+   "t1": {
+    "completion_tokens": 23759,
+    "completion_tokens_per_s": 507.9,
+    "prompt_tokens": 3576,
+    "prompts": 40,
+    "samples": 8000,
+    "seconds": 46.78
+   },
+   "t2": {
+    "completion_tokens": 30000,
+    "completion_tokens_per_s": 1536.9,
+    "prompt_tokens": 5743,
+    "prompts": 100,
+    "samples": 1000,
+    "seconds": 19.52
+   },
+   "t3": {
+    "completion_tokens": 233157,
+    "completion_tokens_per_s": 1455.1,
+    "prompt_tokens": 8144,
+    "prompts": 25,
+    "samples": 5000,
+    "seconds": 160.24
+   },
+   "t4": {
+    "completion_tokens": 7990,
+    "completion_tokens_per_s": 1048.3,
+    "prompt_tokens": 1072,
+    "prompts": 5,
+    "samples": 1000,
+    "seconds": 7.62
+   },
+   "tag": "collect_summary",
+   "wall_s": 427.0
+  },
+  {
+   "null_mean": 0.07546,
+   "null_q95": 0.07925,
+   "p": 0.9251,
+   "prompts": 40,
+   "statistic": 0.07239,
+   "tag": "self_t1"
+  },
+  {
+   "met_check": {
+    "ours": -0.000489,
+    "package": -0.000489
+   },
+   "null_mean": 3e-06,
+   "null_q95": 0.000194,
+   "p": 0.6394,
+   "prompts": 25,
+   "statistic": -4.5e-05,
+   "tag": "self_t3"
+  },
+  {
+   "met_check": {
+    "ours": -1.7e-05,
+    "package": -1.7e-05
+   },
+   "null_mean": -0.0,
+   "null_q95": 3.4e-05,
+   "p": 0.4236,
+   "prompts": 5,
+   "statistic": -1e-06,
+   "tag": "self_t4"
+  }
+ ]
+}

@@ -1,0 +1,151 @@
+{
+ "kind": "gpu-run",
+ "run_id": "736165e5-2e4d-4308-8561-f4941f6cf482",
+ "status": "done",
+ "experiment": "Pilot: harness end to end on Qwen2.5-0.5B",
+ "commit": "2a48a27",
+ "name": "pilot-qwen2.5-0.5b",
+ "mode": "collect",
+ "evidence": [
+  {
+   "gpu": "NVIDIA L4, 580.173.02, 23034 MiB, 8.9",
+   "numpy": "2.3.5",
+   "python": "3.12.3",
+   "tag": "environment",
+   "torch": "2.13.0",
+   "transformers": "5.18.0",
+   "vllm": "0.30.0"
+  },
+  {
+   "analysis": {
+    "permutations": 1000
+   },
+   "batteries": {
+    "t0": {
+     "prompts": "t0-v1.json"
+    },
+    "t1": {
+     "chunk": 100,
+     "max_tokens": 1,
+     "prompts": "t1-v1.json",
+     "samples_per_prompt": 100,
+     "temperature": 1.0
+    },
+    "t3": {
+     "chars": 200,
+     "chunk": 50,
+     "max_tokens": 50,
+     "prompts": "t3-v1.json",
+     "samples_per_prompt": 200,
+     "temperature": 1.0
+    }
+   },
+   "client": {
+    "concurrency": 32,
+    "system_prompt": null
+   },
+   "engine": {
+    "batch_invariant": false,
+    "dtype": "bfloat16",
+    "gpu_memory_utilization": 0.85,
+    "max_model_len": 4096,
+    "max_num_seqs": 256,
+    "prefix_caching": true,
+    "seed": 0
+   },
+   "mode": "collect",
+   "model": {
+    "repo": "Qwen/Qwen2.5-0.5B-Instruct",
+    "revision": "7ae557604adf67be50417f59c2c2f167def9a775"
+   },
+   "name": "pilot-qwen2.5-0.5b",
+   "tag": "config"
+  },
+  {
+   "items": 8,
+   "prompt_tokens": [
+    30,
+    24,
+    55,
+    49,
+    35,
+    47,
+    44,
+    229
+   ],
+   "seconds": 0.46,
+   "tag": "t0"
+  },
+  {
+   "completion_tokens": 2000,
+   "completion_tokens_per_s": 2525.8,
+   "prompt_tokens": 887,
+   "prompts": 20,
+   "samples": 2000,
+   "seconds": 0.79,
+   "tag": "t1"
+  },
+  {
+   "completion_tokens": 241473,
+   "completion_tokens_per_s": 12176.6,
+   "prompt_tokens": 4060,
+   "prompts": 25,
+   "samples": 5000,
+   "seconds": 19.83,
+   "tag": "t3"
+  },
+  {
+   "engine_ready_s": 212.1,
+   "peak_gpu_mib": 19518,
+   "t0": {
+    "items": 8,
+    "prompt_tokens": [
+     30,
+     24,
+     55,
+     49,
+     35,
+     47,
+     44,
+     229
+    ],
+    "seconds": 0.46
+   },
+   "t1": {
+    "completion_tokens": 2000,
+    "completion_tokens_per_s": 2525.8,
+    "prompt_tokens": 887,
+    "prompts": 20,
+    "samples": 2000,
+    "seconds": 0.79
+   },
+   "t3": {
+    "completion_tokens": 241473,
+    "completion_tokens_per_s": 12176.6,
+    "prompt_tokens": 4060,
+    "prompts": 25,
+    "samples": 5000,
+    "seconds": 19.83
+   },
+   "tag": "collect_summary",
+   "wall_s": 235.8
+  },
+  {
+   "null_mean": 0.11904,
+   "null_q95": 0.13305,
+   "p": 0.8881,
+   "prompts": 20,
+   "statistic": 0.10906,
+   "tag": "self_t1"
+  },
+  {
+   "met_package_statistic": -2.4e-05,
+   "null_mean": 1.5e-05,
+   "null_q95": 0.000442,
+   "p": 0.5375,
+   "prompts": 25,
+   "statistic": -2.4e-05,
+   "tag": "self_t3"
+  }
+ ]
+}
