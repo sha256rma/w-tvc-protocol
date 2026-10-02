@@ -121,7 +121,7 @@ cargo run --release --bin tvc -- verify-reference --registry reference/registry.
   --publisher 8f738e4f8e4b3ce2b820dcc9cea88635f0992a56f23eccbc4b5a8d968db421cd
 ```
 
-Known limits of this round: one model, one GPU type, one engine, and only five honest variants, so the threshold itself is noisy (the worst honest variant was flagged up to 45% of the time on one test). A literature review of 24 papers behind these choices is in the OpenResearch project; its conclusions are summarised in [`reference/gpu/README.md`](reference/gpu/README.md).
+Known limits of this round: one model, one GPU type, one engine, and only five honest variants, so the threshold itself is noisy (the worst honest variant was flagged up to 45% of the time on one test). The literature review behind these choices (the 24 papers we were given plus later work) is [`docs/reference-tests-literature.md`](docs/reference-tests-literature.md).
 
 ## What a check proves, and what it doesn't
 
