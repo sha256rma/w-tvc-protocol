@@ -1,0 +1,22 @@
+{
+ "kind": "reference-measurement/v1",
+ "battery": "smoke-12-v0 (the 2 Oct toy battery; prompts sealed in run 8ca35b9b)",
+ "model": "qwen2.5:0.5b (Ollama Q4_K_M)",
+ "machine": "Intel Core i9-9980HK CPU, no GPU, Ollama 0.24.0",
+ "prompts": 12,
+ "samples_per_prompt": 3,
+ "generations": 36,
+ "wall_time_s": 31.0,
+ "wall_time_source": "shell `time` around the harness: real 0m30.987s",
+ "prompt_tokens": 1662,
+ "completion_tokens": 1170,
+ "determinism": {
+  "prompts_identical_across_samples": 12,
+  "prompts": 12
+ },
+ "stopped_at_token_limit": 3,
+ "published_run": "8ca35b9b7b16f5968a713efbed9f2c00dc080ee46cb65085318df909756123d5",
+ "completion_tokens_per_s_overall": 37.7,
+ "published_at_utc": "2026-10-01T19:50:47Z",
+ "published_at_source": "timestamp signed into the reference-run ledger record"
+}

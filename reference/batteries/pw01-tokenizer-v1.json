@@ -1,0 +1,70 @@
+{
+ "kind": "battery/v1",
+ "id": "pw01-tokenizer-v1",
+ "check": "PW-01",
+ "secret": false,
+ "why_public": "Token counts come from a published tokenizer file. Publishing the strings lets anyone reproduce the reference; there is nothing a provider can tune against.",
+ "method": "Encode each string with the model's own tokenizer.json at the pinned commit, add_special_tokens=False. The reference is the vector of 12 counts. An endpoint is compared by its billed prompt tokens for the same strings, minus its chat-template overhead, measured separately.",
+ "items": [
+  {
+   "id": 0,
+   "name": "ascii-prose",
+   "text": "The quick brown fox jumps over the lazy dog, then naps until noon."
+  },
+  {
+   "id": 1,
+   "name": "cjk",
+   "text": "東京は日本の首都で、人口は約千四百万人です。"
+  },
+  {
+   "id": 2,
+   "name": "emoji-modifiers",
+   "text": "👩🏽‍💻 👨‍👩‍👧‍👦 🏳️‍🌈 👍🏿 🇮🇳"
+  },
+  {
+   "id": 3,
+   "name": "repeated-whitespace",
+   "text": "a                                                                b\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\tc"
+  },
+  {
+   "id": 4,
+   "name": "url",
+   "text": "https://huggingface.co/Qwen/Qwen2.5-7B-Instruct/blob/main/config.json?download=true#L12"
+  },
+  {
+   "id": 5,
+   "name": "code-block",
+   "text": "def fib(n):\n    a, b = 0, 1\n    for _ in range(n):\n        a, b = b, a + b\n    return a\n"
+  },
+  {
+   "id": 6,
+   "name": "rare-script",
+   "text": "ᚠᛇᚻ᛫ᛒᛦᚦ᛫ᚠᚱᚩᚠᚢᚱ ሰላም ዓለም ꦲꦏ꧀ꦱꦫꦗꦮ"
+  },
+  {
+   "id": 7,
+   "name": "chatml-control",
+   "text": "<|im_start|>user\nhello<|im_end|>"
+  },
+  {
+   "id": 8,
+   "name": "llama3-control",
+   "text": "<|begin_of_text|><|start_header_id|>user<|end_header_id|>"
+  },
+  {
+   "id": 9,
+   "name": "mistral-control",
+   "text": "[INST] hello [/INST]"
+  },
+  {
+   "id": 10,
+   "name": "deepseek-control",
+   "text": "<｜begin▁of▁sentence｜><｜User｜>hello<｜Assistant｜>"
+  },
+  {
+   "id": 11,
+   "name": "think-tags",
+   "text": "<think>\nreasoning goes here\n</think>"
+  }
+ ]
+}

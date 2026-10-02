@@ -1,0 +1,264 @@
+<title>Reference Test Bench</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: one column like a calibration sheet; summary strip first, then the
+   model-by-test matrix, then pair results, raw counts, runs and definitions. */
+:root {
+  --bg: #f4f6f4;
+  --panel: #ffffff;
+  --fg: #18211d;
+  --muted: #5b6862;
+  --line: #d6ddd9;
+  --accent: #1d5f8c;
+  --ok: #1f7a4a;   --ok-bg: #e2f2e8;
+  --bad: #a83a2c;  --bad-bg: #f8e3df;
+  --warn: #8a5a00; --warn-bg: #f7ecd2;
+  --idle: #6b756f; --idle-bg: #eceeed;
+  --plan: #1d5f8c; --plan-bg: #e3edf5;
+  --diff: #fbe7b5;
+  --display: "IBM Plex Sans Condensed", "Arial Narrow", system-ui, sans-serif;
+  --body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #111613; --panel: #19201c; --fg: #e3e9e5; --muted: #98a59e; --line: #2c3631;
+  --accent: #7ab4dd;
+  --ok: #6fcf98; --ok-bg: #173323; --bad: #ef8b7c; --bad-bg: #3a1d18;
+  --warn: #e3b55c; --warn-bg: #352a12; --idle: #9aa49f; --idle-bg: #232b27;
+  --plan: #8cc0e6; --plan-bg: #172a38; --diff: #4a3a10; color-scheme: dark; } }
+:root[data-theme="dark"] {
+  --bg: #111613; --panel: #19201c; --fg: #e3e9e5; --muted: #98a59e; --line: #2c3631;
+  --accent: #7ab4dd;
+  --ok: #6fcf98; --ok-bg: #173323; --bad: #ef8b7c; --bad-bg: #3a1d18;
+  --warn: #e3b55c; --warn-bg: #352a12; --idle: #9aa49f; --idle-bg: #232b27;
+  --plan: #8cc0e6; --plan-bg: #172a38; --diff: #4a3a10; color-scheme: dark; }
+
+body { background: var(--bg); color: var(--fg); font: 15px/1.5 var(--body); }
+.wrap { max-width: 1180px; margin: 0 auto; padding-inline: 20px; padding-block: 28px 64px; display: grid; gap: 34px; }
+h1, h2 { font-family: var(--display); font-weight: 600; text-wrap: balance; margin: 0; }
+h1 { font-size: 2rem; letter-spacing: -0.01em; }
+h2 { font-size: 1.25rem; }
+p { margin: 0; max-width: 68ch; }
+.lede { color: var(--muted); }
+.eyebrow { font: 500 0.72rem/1 var(--mono); text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+header { display: grid; gap: 10px; }
+section { display: grid; gap: 12px; min-width: 0; }
+.mono, code { font-family: var(--mono); font-size: 0.86em; }
+.num { font-variant-numeric: tabular-nums; }
+
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; }
+.tile { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 12px 14px; display: grid; gap: 4px; }
+.tile b { font: 600 1.6rem/1.1 var(--display); font-variant-numeric: tabular-nums; }
+.tile span { color: var(--muted); font-size: 0.86rem; }
+
+.scroll { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
+table { border-collapse: collapse; width: 100%; font-size: 0.88rem; }
+th, td { padding: 7px 10px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+tr:last-child td { border-bottom: 0; }
+th { font: 500 0.72rem/1.3 var(--mono); text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); background: var(--bg); white-space: nowrap; }
+th.check { text-align: center; }
+td.c { text-align: center; white-space: nowrap; }
+td.r { text-align: right; }
+.model { font-family: var(--mono); font-size: 0.85rem; white-space: nowrap; }
+.sub { display: block; color: var(--muted); font-size: 0.78rem; font-family: var(--body); }
+
+.pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font: 500 0.74rem/1.5 var(--mono); white-space: nowrap; }
+.s-measured, .s-yes { color: var(--ok); background: var(--ok-bg); }
+.s-no { color: var(--bad); background: var(--bad-bg); }
+.s-blocked { color: var(--warn); background: var(--warn-bg); }
+.s-planned { color: var(--plan); background: var(--plan-bg); }
+.s-na, .s-later, .s-notrun { color: var(--idle); background: var(--idle-bg); }
+td.diff { background: var(--diff); font-weight: 600; }
+
+.legend { display: flex; flex-wrap: wrap; gap: 8px 14px; color: var(--muted); font-size: 0.84rem; align-items: center; }
+.cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+.defs { display: grid; gap: 6px; margin: 0; }
+.defs div { display: grid; grid-template-columns: minmax(120px, 13em) 1fr; gap: 10px; font-size: 0.88rem; }
+.defs dt { font-family: var(--mono); font-size: 0.82rem; }
+.defs dd { margin: 0; color: var(--muted); }
+ul.plain { margin: 0; padding-left: 1.1em; display: grid; gap: 6px; max-width: 80ch; }
+footer { color: var(--muted); font-size: 0.82rem; }
+@media (max-width: 520px) { .defs div { grid-template-columns: 1fr; gap: 0; } h1 { font-size: 1.6rem; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="eyebrow">W-TVC · reference tests</div>
+    <h1>Reference Test Bench</h1>
+    <p class="lede">Which test runs on which model, what each test has to tell apart, and what every run measured. Built from <code>reference/plan.json</code> and <code>reference/runs/</code>; a number that isn't in one of those files doesn't appear here. Blank means not measured yet.</p>
+    <p class="eyebrow" id="updated"></p>
+  </header>
+
+  <section>
+    <div class="tiles" id="tiles"></div>
+  </section>
+
+  <section>
+    <h2>Model × test matrix</h2>
+    <p class="lede">Rows are models pinned to one Hugging Face commit. Columns are the batteries, keyed to SPOT catalogue check IDs. Fits assumes 16-bit weights must stay under 80% of GPU memory, leaving room for the cache; the T4 has no bf16, so it runs fp16.</p>
+    <div class="legend" id="legend"></div>
+    <div class="scroll"><table id="matrix"></table></div>
+  </section>
+
+  <section>
+    <h2>Can each test tell the pair apart?</h2>
+    <p class="lede">A reference test is only worth running if it separates the claimed model from what a provider would plausibly serve instead. Each row is one substitution case; the PW-01 column is measured, the rest is what we expect and which battery has to prove it.</p>
+    <div class="scroll"><table id="pairs"></table></div>
+  </section>
+
+  <section>
+    <h2>PW-01 token counts</h2>
+    <p class="lede">The measured reference: tokens per string with each model's own <code>tokenizer.json</code>. Highlighted cells differ from Qwen2.5. Models with identical rows are indistinguishable to this check.</p>
+    <div class="scroll"><table id="counts"></table></div>
+  </section>
+
+  <section>
+    <h2>Runs</h2>
+    <div class="scroll"><table id="runs"></table></div>
+  </section>
+
+  <section>
+    <h2>What gets measured</h2>
+    <div class="cols" id="metrics"></div>
+  </section>
+
+  <section>
+    <h2>Blocked or missing</h2>
+    <ul class="plain" id="blockers"></ul>
+  </section>
+
+  <footer>Regenerate with <code>python3 reference/dashboard.py</code> after each run.</footer>
+</div>
+
+<script id="data" type="application/json">/*__DATA__*/</script>
+<script>
+(function () {
+  const { plan, runs, batteries } = JSON.parse(document.getElementById("data").textContent);
+  const pw = runs["pw01-tokenizer-v1"];
+  const pwBy = Object.fromEntries((pw ? pw.models : []).map(m => [m.model, m]));
+  const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const pill = (state, text, title) => `<span class="pill s-${state}" title="${esc(title || "")}">${esc(text || state)}</span>`;
+  const gb = n => n == null ? "" : n.toFixed(1);
+
+  document.getElementById("updated").textContent = "plan updated " + plan.updated + (pw ? " · PW-01 measured " + pw.measured_at_utc.replace("T", " ").replace("Z", " UTC") : "");
+
+  function cell(model, bat) {
+    if (bat.id === "pw01-tokenizer-v1") {
+      const r = pwBy[model.id];
+      if (r && r.status === "measured") return pill("measured", r.total_tokens + " tok", "sha256 " + r.tokenizer_sha256);
+      if (r && r.status === "blocked") return pill("blocked", "gated", r.reason);
+      return pill("planned");
+    }
+    if (bat.id === "bh01-reasoning-v1" && !model.reasoning) return pill("na", "n/a", "not a reasoning model");
+    if (bat.id === "qz02-quant-v1") {
+      if (model.id.endsWith("-awq")) return pill("na", "is copy", "this is the 4-bit copy QZ-02 compares against");
+      if (!plan.models.some(m => m.id === model.id + "-awq")) return pill("na", "n/a", "no 4-bit copy pinned yet");
+    }
+    if (bat.status === "later") return pill("later");
+    if (model.gated) return pill("blocked", "gated", "needs a Hugging Face token and an accepted licence");
+    return pill("planned", "planned", bat.status === "to author" ? "battery not written yet; needs a GPU run" : "");
+  }
+
+  function fits(model, gpu) {
+    if (model.weights_gb_16bit == null) return gpu.id === "l4" ? pill("yes", "yes", "4-bit copy, smaller than the 16-bit model") : pill("notrun", "?", "not checked");
+    return model.weights_gb_16bit <= 0.8 * gpu.memory_gb ? pill("yes", "yes") : pill("no", "no", `${gb(model.weights_gb_16bit)} GB of weights > 80% of ${gpu.memory_gb} GB`);
+  }
+
+  // Summary tiles.
+  const measured = (pw ? pw.models : []).filter(m => m.status === "measured").length;
+  const blocked = (pw ? pw.models : []).filter(m => m.status === "blocked").length;
+  const authored = plan.batteries.filter(b => b.status === "authored").length;
+  const gpuRuns = Object.values(runs).filter(r => /L4|T4|GPU/.test(r.machine || "") && !/no GPU|CPU only/.test(r.machine || "")).length;
+  const tiles = [
+    [plan.models.length, "models in the plan"],
+    [`${measured} / ${blocked}`, "PW-01 measured / blocked"],
+    [`${authored} of ${plan.batteries.length}`, "batteries written"],
+    [Object.keys(runs).length, "reference runs recorded"],
+    [gpuRuns, "runs on a GPU"],
+    [0, "provider endpoints checked"],
+  ];
+  document.getElementById("tiles").innerHTML = tiles.map(([v, l]) => `<div class="tile"><b>${esc(v)}</b><span>${esc(l)}</span></div>`).join("");
+
+  document.getElementById("legend").innerHTML = [
+    pill("measured") + " reference measured",
+    pill("planned") + " planned, needs a battery and a GPU run",
+    pill("blocked", "gated") + " needs access first",
+    pill("na", "n/a") + " doesn't apply",
+    pill("later") + " after the others",
+  ].join("");
+
+  // Matrix.
+  const l4 = plan.gpus.find(g => g.id === "l4"), t4 = plan.gpus.find(g => g.id === "t4");
+  let m = "<thead><tr><th>Model</th><th>Params</th><th>16-bit GB</th><th>Fits L4</th><th>Fits T4</th>";
+  m += plan.batteries.map(b => `<th class="check" title="${esc(b.what)}">${esc(b.check)}<span class="sub">${b.secret ? "sealed" : "public"}</span></th>`).join("");
+  m += "</tr></thead><tbody>";
+  for (const model of plan.models) {
+    m += `<tr><td class="model">${esc(model.id)}<span class="sub">${esc(model.hf_repo)} @ ${esc(model.hf_commit.slice(0, 7))} · ${esc(model.license)}</span></td>`;
+    m += `<td class="r num">${(model.params / 1e9).toFixed(2)}B</td><td class="r num">${model.weights_gb_16bit == null ? "4-bit" : gb(model.weights_gb_16bit)}</td>`;
+    m += `<td class="c">${fits(model, l4)}</td><td class="c">${fits(model, t4)}</td>`;
+    m += plan.batteries.map(b => `<td class="c">${cell(model, b)}</td>`).join("") + "</tr>";
+  }
+  document.getElementById("matrix").innerHTML = m + "</tbody>";
+
+  // Pairs.
+  const pwPairs = Object.fromEntries((pw ? pw.pairs : []).map(p => [p.claimed + "|" + p.served, p]));
+  let p = "<thead><tr><th>Sold as</th><th>Actually served</th><th>Case</th><th>PW-01 (measured)</th><th>What should decide it</th></tr></thead><tbody>";
+  for (const pair of plan.pairs) {
+    const r = pwPairs[pair.claimed + "|" + pair.served];
+    let res = pill("notrun", "not run");
+    if (r && r.separates === "yes") res = pill("yes", "separates") + `<span class="sub">on ${esc(r.items_that_differ.join(", "))}</span>`;
+    else if (r && r.separates === "no") res = pill("no", "can't tell") + `<span class="sub">identical counts</span>`;
+    else if (r && r.separates === "n/a") res = pill("na", "n/a") + `<span class="sub">${esc(r.reason)}</span>`;
+    else if (r) res = pill("notrun", "not run") + `<span class="sub">${esc(r.reason || "")}</span>`;
+    p += `<tr><td class="model">${esc(pair.claimed)}</td><td class="model">${esc(pair.served)}</td><td>${esc(pair.case)}</td><td>${res}</td><td>${esc(pair.expected)}</td></tr>`;
+  }
+  document.getElementById("pairs").innerHTML = p + "</tbody>";
+
+  // Counts grid.
+  if (pw) {
+    const rows = pw.models.filter(r => r.status === "measured");
+    const base = rows[0];
+    const names = batteries[pw.battery].items.map(item => item.name);
+    let c = "<thead><tr><th>Model</th>" + names.map(n => `<th class="check">${esc(n)}</th>`).join("") + "<th class=\"check\">total</th><th>tokenizer.json sha256</th></tr></thead><tbody>";
+    for (const r of rows) {
+      c += `<tr><td class="model">${esc(r.model)}</td>` + r.counts.map((v, i) => `<td class="c num${v !== base.counts[i] ? " diff" : ""}">${v}</td>`).join("");
+      c += `<td class="c num">${r.total_tokens}</td><td class="mono">${esc(r.tokenizer_sha256.slice(0, 16))}…</td></tr>`;
+    }
+    for (const r of pw.models.filter(r => r.status !== "measured")) {
+      c += `<tr><td class="model">${esc(r.model)}</td><td colspan="${names.length + 2}">${pill("blocked", "gated", r.reason)}</td></tr>`;
+    }
+    document.getElementById("counts").innerHTML = c + "</tbody>";
+  }
+
+  // Runs.
+  let rr = "<thead><tr><th>Run</th><th>Machine</th><th>Scope</th><th>Wall time</th><th>Prompt tok</th><th>Completion tok</th><th>Tok/s</th><th>Determinism</th></tr></thead><tbody>";
+  for (const [id, r] of Object.entries(runs)) {
+    if (r.models) {
+      const ms = r.models.filter(x => x.status === "measured");
+      const t = ms.reduce((a, x) => a + x.fetch_s + x.encode_s, 0);
+      rr += `<tr><td class="model">${esc(id)}<span class="sub">${esc(r.check)} · ${esc(r.measured_at_utc)}</span></td><td>${esc(r.machine)}</td><td>${ms.length} models, ${r.models.length - ms.length} blocked</td><td class="r num">${t.toFixed(1)} s<span class="sub">download + encode</span></td><td class="r num">${ms.reduce((a, x) => a + x.total_tokens, 0)}<span class="sub">counted, not generated</span></td><td class="r">–</td><td class="r">–</td><td class="r">exact by construction</td></tr>`;
+    } else {
+      const d = r.determinism || {};
+      rr += `<tr><td class="model">${esc(id)}<span class="sub">${esc(r.battery)} · published ${esc(r.published_at_utc || "")}</span></td><td>${esc(r.machine)}</td><td>${r.prompts} prompts × ${r.samples_per_prompt}</td><td class="r num">${r.wall_time_s} s</td><td class="r num">${r.prompt_tokens}</td><td class="r num">${r.completion_tokens}</td><td class="r num">${r.completion_tokens_per_s_overall}</td><td class="r num">${d.prompts_identical_across_samples}/${d.prompts} identical</td></tr>`;
+    }
+  }
+  document.getElementById("runs").innerHTML = rr + "</tbody>";
+
+  // Metric definitions.
+  const titles = { reference_run: "Each reference run", validation: "Each test, on each pair", endpoint_check: "Each check of a provider endpoint" };
+  document.getElementById("metrics").innerHTML = Object.entries(plan.metrics).map(([k, rows]) =>
+    `<div><div class="eyebrow">${esc(titles[k] || k)}</div><dl class="defs">` + rows.map(([n, d]) => `<div><dt>${esc(n)}</dt><dd>${esc(d)}</dd></div>`).join("") + "</dl></div>").join("");
+
+  // Blockers.
+  const gated = plan.models.filter(x => x.gated).map(x => x.id);
+  const toWrite = plan.batteries.filter(b => b.status !== "authored").map(b => b.id);
+  document.getElementById("blockers").innerHTML = [
+    `${gated.length} gated models (${gated.join(", ")}) need a Hugging Face token with each licence accepted.`,
+    `${toWrite.length} batteries aren't written yet: ${toWrite.join(", ")}. The sealed ones are written privately and committed by root.`,
+    "No GPU run yet. Everything except PW-01 needs one; the L4 fits every model in this plan at 16 bits.",
+    "Cross-GPU agreement on a T4 only works for models up to about 3B, and in fp16 on both GPUs, because the T4 has no bf16 and 16 GB of memory.",
+    "Qwen2.5-3B-Instruct is under the Qwen research licence; check it before using its reference commercially.",
+  ].map(s => `<li>${esc(s)}</li>`).join("");
+})();
+</script>

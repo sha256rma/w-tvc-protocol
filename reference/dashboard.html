@@ -1,0 +1,264 @@
+<title>Reference Test Bench</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: one column like a calibration sheet; summary strip first, then the
+   model-by-test matrix, then pair results, raw counts, runs and definitions. */
+:root {
+  --bg: #f4f6f4;
+  --panel: #ffffff;
+  --fg: #18211d;
+  --muted: #5b6862;
+  --line: #d6ddd9;
+  --accent: #1d5f8c;
+  --ok: #1f7a4a;   --ok-bg: #e2f2e8;
+  --bad: #a83a2c;  --bad-bg: #f8e3df;
+  --warn: #8a5a00; --warn-bg: #f7ecd2;
+  --idle: #6b756f; --idle-bg: #eceeed;
+  --plan: #1d5f8c; --plan-bg: #e3edf5;
+  --diff: #fbe7b5;
+  --display: "IBM Plex Sans Condensed", "Arial Narrow", system-ui, sans-serif;
+  --body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #111613; --panel: #19201c; --fg: #e3e9e5; --muted: #98a59e; --line: #2c3631;
+  --accent: #7ab4dd;
+  --ok: #6fcf98; --ok-bg: #173323; --bad: #ef8b7c; --bad-bg: #3a1d18;
+  --warn: #e3b55c; --warn-bg: #352a12; --idle: #9aa49f; --idle-bg: #232b27;
+  --plan: #8cc0e6; --plan-bg: #172a38; --diff: #4a3a10; color-scheme: dark; } }
+:root[data-theme="dark"] {
+  --bg: #111613; --panel: #19201c; --fg: #e3e9e5; --muted: #98a59e; --line: #2c3631;
+  --accent: #7ab4dd;
+  --ok: #6fcf98; --ok-bg: #173323; --bad: #ef8b7c; --bad-bg: #3a1d18;
+  --warn: #e3b55c; --warn-bg: #352a12; --idle: #9aa49f; --idle-bg: #232b27;
+  --plan: #8cc0e6; --plan-bg: #172a38; --diff: #4a3a10; color-scheme: dark; }
+
+body { background: var(--bg); color: var(--fg); font: 15px/1.5 var(--body); }
+.wrap { max-width: 1180px; margin: 0 auto; padding-inline: 20px; padding-block: 28px 64px; display: grid; gap: 34px; }
+h1, h2 { font-family: var(--display); font-weight: 600; text-wrap: balance; margin: 0; }
+h1 { font-size: 2rem; letter-spacing: -0.01em; }
+h2 { font-size: 1.25rem; }
+p { margin: 0; max-width: 68ch; }
+.lede { color: var(--muted); }
+.eyebrow { font: 500 0.72rem/1 var(--mono); text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+header { display: grid; gap: 10px; }
+section { display: grid; gap: 12px; min-width: 0; }
+.mono, code { font-family: var(--mono); font-size: 0.86em; }
+.num { font-variant-numeric: tabular-nums; }
+
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; }
+.tile { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 12px 14px; display: grid; gap: 4px; }
+.tile b { font: 600 1.6rem/1.1 var(--display); font-variant-numeric: tabular-nums; }
+.tile span { color: var(--muted); font-size: 0.86rem; }
+
+.scroll { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
+table { border-collapse: collapse; width: 100%; font-size: 0.88rem; }
+th, td { padding: 7px 10px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+tr:last-child td { border-bottom: 0; }
+th { font: 500 0.72rem/1.3 var(--mono); text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); background: var(--bg); white-space: nowrap; }
+th.check { text-align: center; }
+td.c { text-align: center; white-space: nowrap; }
+td.r { text-align: right; }
+.model { font-family: var(--mono); font-size: 0.85rem; white-space: nowrap; }
+.sub { display: block; color: var(--muted); font-size: 0.78rem; font-family: var(--body); }
+
+.pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font: 500 0.74rem/1.5 var(--mono); white-space: nowrap; }
+.s-measured, .s-yes { color: var(--ok); background: var(--ok-bg); }
+.s-no { color: var(--bad); background: var(--bad-bg); }
+.s-blocked { color: var(--warn); background: var(--warn-bg); }
+.s-planned { color: var(--plan); background: var(--plan-bg); }
+.s-na, .s-later, .s-notrun { color: var(--idle); background: var(--idle-bg); }
+td.diff { background: var(--diff); font-weight: 600; }
+
+.legend { display: flex; flex-wrap: wrap; gap: 8px 14px; color: var(--muted); font-size: 0.84rem; align-items: center; }
+.cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+.defs { display: grid; gap: 6px; margin: 0; }
+.defs div { display: grid; grid-template-columns: minmax(120px, 13em) 1fr; gap: 10px; font-size: 0.88rem; }
+.defs dt { font-family: var(--mono); font-size: 0.82rem; }
+.defs dd { margin: 0; color: var(--muted); }
+ul.plain { margin: 0; padding-left: 1.1em; display: grid; gap: 6px; max-width: 80ch; }
+footer { color: var(--muted); font-size: 0.82rem; }
+@media (max-width: 520px) { .defs div { grid-template-columns: 1fr; gap: 0; } h1 { font-size: 1.6rem; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="eyebrow">W-TVC · reference tests</div>
+    <h1>Reference Test Bench</h1>
+    <p class="lede">Which test runs on which model, what each test has to tell apart, and what every run measured. Built from <code>reference/plan.json</code> and <code>reference/runs/</code>; a number that isn't in one of those files doesn't appear here. Blank means not measured yet.</p>
+    <p class="eyebrow" id="updated"></p>
+  </header>
+
+  <section>
+    <div class="tiles" id="tiles"></div>
+  </section>
+
+  <section>
+    <h2>Model × test matrix</h2>
+    <p class="lede">Rows are models pinned to one Hugging Face commit. Columns are the batteries, keyed to SPOT catalogue check IDs. Fits assumes 16-bit weights must stay under 80% of GPU memory, leaving room for the cache; the T4 has no bf16, so it runs fp16.</p>
+    <div class="legend" id="legend"></div>
+    <div class="scroll"><table id="matrix"></table></div>
+  </section>
+
+  <section>
+    <h2>Can each test tell the pair apart?</h2>
+    <p class="lede">A reference test is only worth running if it separates the claimed model from what a provider would plausibly serve instead. Each row is one substitution case; the PW-01 column is measured, the rest is what we expect and which battery has to prove it.</p>
+    <div class="scroll"><table id="pairs"></table></div>
+  </section>
+
+  <section>
+    <h2>PW-01 token counts</h2>
+    <p class="lede">The measured reference: tokens per string with each model's own <code>tokenizer.json</code>. Highlighted cells differ from Qwen2.5. Models with identical rows are indistinguishable to this check.</p>
+    <div class="scroll"><table id="counts"></table></div>
+  </section>
+
+  <section>
+    <h2>Runs</h2>
+    <div class="scroll"><table id="runs"></table></div>
+  </section>
+
+  <section>
+    <h2>What gets measured</h2>
+    <div class="cols" id="metrics"></div>
+  </section>
+
+  <section>
+    <h2>Blocked or missing</h2>
+    <ul class="plain" id="blockers"></ul>
+  </section>
+
+  <footer>Regenerate with <code>python3 reference/dashboard.py</code> after each run.</footer>
+</div>
+
+<script id="data" type="application/json">{"plan": {"schema": "w-tvc.reference-plan/v0", "updated": "2026-10-02", "gpus": [{"id": "l4", "name": "NVIDIA L4", "memory_gb": 24, "bf16": true, "source": "NVIDIA spec sheet"}, {"id": "t4", "name": "NVIDIA T4", "memory_gb": 16, "bf16": false, "source": "NVIDIA spec sheet; Turing has no bf16, so runs are fp16"}], "models": [{"id": "qwen2.5-0.5b", "hf_repo": "Qwen/Qwen2.5-0.5B-Instruct", "hf_commit": "7ae557604adf67be50417f59c2c2f167def9a775", "params": 494032768, "license": "apache-2.0", "gated": false, "family": "qwen2.5", "reasoning": false, "weights_gb_16bit": 1.0}, {"id": "qwen2.5-1.5b", "hf_repo": "Qwen/Qwen2.5-1.5B-Instruct", "hf_commit": "989aa7980e4cf806f80c7fef2b1adb7bc71aa306", "params": 1543714304, "license": "apache-2.0", "gated": false, "family": "qwen2.5", "reasoning": false, "weights_gb_16bit": 3.1}, {"id": "qwen2.5-3b", "hf_repo": "Qwen/Qwen2.5-3B-Instruct", "hf_commit": "aa8e72537993ba99e69dfaafa59ed015b17504d1", "params": 3085938688, "license": "other (Qwen research licence)", "gated": false, "family": "qwen2.5", "reasoning": false, "weights_gb_16bit": 6.2}, {"id": "qwen2.5-7b", "hf_repo": "Qwen/Qwen2.5-7B-Instruct", "hf_commit": "a09a35458c702b33eeacc393d103063234e8bc28", "params": 7615616512, "license": "apache-2.0", "gated": false, "family": "qwen2.5", "reasoning": false, "weights_gb_16bit": 15.2}, {"id": "qwen2.5-7b-awq", "hf_repo": "Qwen/Qwen2.5-7B-Instruct-AWQ", "hf_commit": "b25037543e9394b818fdfca67ab2a00ecc7dd641", "params": 7615616512, "license": "apache-2.0", "gated": false, "family": "qwen2.5", "reasoning": false, "weights_gb_16bit": null}, {"id": "qwen3-4b", "hf_repo": "Qwen/Qwen3-4B", "hf_commit": "1cfa9a7208912126459214e8b04321603b3df60c", "params": 4022468096, "license": "apache-2.0", "gated": false, "family": "qwen3", "reasoning": true, "weights_gb_16bit": 8.0}, {"id": "qwen3-8b", "hf_repo": "Qwen/Qwen3-8B", "hf_commit": "b968826d9c46dd6066d109eabc6255188de91218", "params": 8190735360, "license": "apache-2.0", "gated": false, "family": "qwen3", "reasoning": true, "weights_gb_16bit": 16.4}, {"id": "r1-distill-qwen-1.5b", "hf_repo": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B", "hf_commit": "ad9f0ae0864d7fbcd1cd905e3c6c5b069cc8b562", "params": 1777088000, "license": "mit", "gated": false, "family": "deepseek-r1-distill", "reasoning": true, "weights_gb_16bit": 3.6}, {"id": "r1-distill-qwen-7b", "hf_repo": "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", "hf_commit": "916b56a44061fd5cd7d6a8fb632557ed4f724f60", "params": 7615616512, "license": "mit", "gated": false, "family": "deepseek-r1-distill", "reasoning": true, "weights_gb_16bit": 15.2}, {"id": "llama3.2-1b", "hf_repo": "meta-llama/Llama-3.2-1B-Instruct", "hf_commit": "9213176726f574b556790deb65791e0c5aa438b6", "params": 1235814400, "license": "llama3.2", "gated": true, "family": "llama3", "reasoning": false, "weights_gb_16bit": 2.5}, {"id": "llama3.2-3b", "hf_repo": "meta-llama/Llama-3.2-3B-Instruct", "hf_commit": "0cb88a4f764b7a12671c53f0838cd831a0843b95", "params": 3212749824, "license": "llama3.2", "gated": true, "family": "llama3", "reasoning": false, "weights_gb_16bit": 6.4}, {"id": "llama3.1-8b", "hf_repo": "meta-llama/Llama-3.1-8B-Instruct", "hf_commit": "0e9e39f249a16976918f6564b8830bc894c89659", "params": 8030261248, "license": "llama3.1", "gated": true, "family": "llama3", "reasoning": false, "weights_gb_16bit": 16.1}, {"id": "mistral-7b-v0.3", "hf_repo": "mistralai/Mistral-7B-Instruct-v0.3", "hf_commit": "c170c708c41dac9275d15a8fff4eca08d52bab71", "params": 7248023552, "license": "apache-2.0", "gated": false, "family": "mistral", "reasoning": false, "weights_gb_16bit": 14.5}, {"id": "gemma2-2b", "hf_repo": "google/gemma-2-2b-it", "hf_commit": "299a8560bedf22ed1c72a8a11e7dce4a7f9f51f8", "params": 2614341888, "license": "gemma", "gated": true, "family": "gemma2", "reasoning": false, "weights_gb_16bit": 5.2}], "pairs": [{"claimed": "qwen2.5-7b", "served": "qwen2.5-1.5b", "case": "smaller sibling under the flagship name", "expected": "Same tokenizer, so PW-01 and ID-06 cannot separate. Needs ID-03, ID-01 or CF-01."}, {"claimed": "qwen2.5-7b", "served": "qwen2.5-7b-awq", "case": "4-bit copy of the right model", "expected": "Same tokenizer and template. Only ID-01 and QZ-02 have a chance; 4-bit is detectable, 8-bit is not."}, {"claimed": "qwen3-8b", "served": "qwen2.5-7b", "case": "previous generation under the new name", "expected": "Tokenizers are close; PW-01 may separate on think tags. BH-01 should."}, {"claimed": "r1-distill-qwen-7b", "served": "qwen2.5-7b", "case": "chat model sold as the reasoner (the documented shadow-API case)", "expected": "BH-01 decides it: no reasoning block, no reasoning tokens."}, {"claimed": "qwen3-8b", "served": "qwen3-8b (thinking off)", "case": "right weights, reasoning switched off", "expected": "BH-01 only; every weight-identity check passes."}, {"claimed": "llama3.1-8b", "served": "llama3.2-3b", "case": "smaller sibling, same tokenizer generation", "expected": "PW-01 cannot separate; needs ID-03 or CF-01. Gated: needs a Hugging Face token."}, {"claimed": "mistral-7b-v0.3", "served": "qwen2.5-7b", "case": "another family entirely", "expected": "PW-01 and ID-06 should both separate in one cheap call."}], "batteries": [{"id": "pw01-tokenizer-v1", "check": "PW-01", "tier": "A", "needs_gpu": false, "secret": false, "status": "authored", "items": 12, "applies": "every model with a published tokenizer", "catalogue_cost_tokens": 120, "what": "Token counts of 12 strings chosen to split tokenizers (CJK, emoji, whitespace, code, rare script, four families' control strings, think tags)."}, {"id": "id06-control-strings-v1", "check": "ID-06", "tier": "A", "needs_gpu": true, "secret": false, "status": "to author", "items": 8, "applies": "every model", "catalogue_cost_tokens": 250, "what": "Each family's control strings inside ordinary user text; record whether the model echoes, strips or derails."}, {"id": "bh01-reasoning-v1", "check": "BH-01", "tier": "A", "needs_gpu": true, "secret": true, "status": "to author", "items": 10, "applies": "reasoning models", "catalogue_cost_tokens": 400, "what": "Prompts on which the reasoner always produces a reasoning block and reasoning tokens."}, {"id": "bh03-determinism-v1", "check": "BH-03", "tier": "C", "needs_gpu": true, "secret": false, "status": "to author", "items": 1, "applies": "every model", "catalogue_cost_tokens": 600, "what": "One prompt repeated 20 times at temperature 0 on each GPU; calibrates how wide every other band must be."}, {"id": "id03-fixed-answers-v1", "check": "ID-03", "tier": "A", "needs_gpu": true, "secret": true, "status": "to author", "items": 50, "applies": "open weights", "catalogue_cost_tokens": 3000, "what": "Deterministic questions chosen where the claimed model and its named substitutes disagree; agreement rate is the score."}, {"id": "id01-next-token-v1", "check": "ID-01", "tier": "A", "needs_gpu": true, "secret": true, "status": "to author", "items": 30, "applies": "endpoints that return logprobs", "catalogue_cost_tokens": 400, "what": "High-entropy single-token prompts; compare the top-k logprob distribution with the reference band."}, {"id": "qz02-quant-v1", "check": "QZ-02", "tier": "B", "needs_gpu": true, "secret": true, "status": "to author", "items": 40, "applies": "open weights with a local 4-bit copy", "catalogue_cost_tokens": 20000, "what": "Precision-sensitive tasks run on the 16-bit reference and a 4-bit copy; the endpoint is placed between them."}, {"id": "cf01-floor-v1", "check": "CF-01", "tier": "A", "needs_gpu": true, "secret": true, "status": "later", "items": null, "applies": "every model, once validated", "catalogue_cost_tokens": 40000, "what": "Items the claimed model passes at least 90% of the time and each named substitute fails at least 80% of the time. Built only after the others."}], "metrics": {"reference_run": [["wall_time_s", "Seconds from start to last output, measured by the harness."], ["load_time_s", "Seconds to load the weights before the first prompt."], ["prompt_tokens", "Tokens the engine counted as input, summed over the battery."], ["completion_tokens", "Tokens generated, summed over the battery."], ["tokens_per_s", "completion_tokens / generation time."], ["peak_gpu_mem_gb", "Highest GPU memory in use during the run (nvidia-smi)."], ["gpu_hours", "Machine time billed for the run, from the VM's start and stop times."], ["credits_spent", "From the Google Cloud billing export. Never estimated."], ["determinism", "Share of prompts whose repeated samples were byte-identical on the same GPU."], ["cross_gpu_agreement", "Share of prompts with identical output on L4 and T4 (same dtype)."]], "validation": [["separates", "Does this check give a different answer for the claimed model and the substitute? yes / no / not run."], ["margin", "How far apart the two results are, in the check's own units."], ["false_alarm", "Does the check flag the real model when it runs on the other GPU? It must not."]], "endpoint_check": [["verdict", "pass / fail / inconclusive for one check on one pinned endpoint."], ["tokens_billed", "What the check cost the customer, from the endpoint's usage field."], ["latency_p50_ms, latency_p95_ms", "From repeated calls, never one sample."], ["power", "Smallest substitution fraction this run could have detected."]]}}, "runs": {"pw01-tokenizer-v1": {"kind": "reference-measurement/v1", "battery": "pw01-tokenizer-v1", "check": "PW-01", "measured_at_utc": "2026-10-02T04:25:19Z", "machine": "x86_64 Darwin 23.6.0, CPU only", "tool": "huggingface tokenizers", "models": [{"model": "qwen2.5-0.5b", "hf_repo": "Qwen/Qwen2.5-0.5B-Instruct", "hf_commit": "7ae557604adf67be50417f59c2c2f167def9a775", "status": "measured", "tokenizer_sha256": "c0382117ea329cdf097041132f6d735924b697924d6f6fc3945713e96ce87539", "tokenizer_bytes": 7031645, "vocab_size": 151665, "counts": [16, 16, 30, 5, 29, 37, 45, 5, 21, 7, 21, 11], "total_tokens": 243, "fetch_s": 1.148, "encode_s": 0.2802}, {"model": "qwen2.5-1.5b", "hf_repo": "Qwen/Qwen2.5-1.5B-Instruct", "hf_commit": "989aa7980e4cf806f80c7fef2b1adb7bc71aa306", "status": "measured", "tokenizer_sha256": "c0382117ea329cdf097041132f6d735924b697924d6f6fc3945713e96ce87539", "tokenizer_bytes": 7031645, "vocab_size": 151665, "counts": [16, 16, 30, 5, 29, 37, 45, 5, 21, 7, 21, 11], "total_tokens": 243, "fetch_s": 1.215, "encode_s": 0.2885}, {"model": "qwen2.5-3b", "hf_repo": "Qwen/Qwen2.5-3B-Instruct", "hf_commit": "aa8e72537993ba99e69dfaafa59ed015b17504d1", "status": "measured", "tokenizer_sha256": "c0382117ea329cdf097041132f6d735924b697924d6f6fc3945713e96ce87539", "tokenizer_bytes": 7031645, "vocab_size": 151665, "counts": [16, 16, 30, 5, 29, 37, 45, 5, 21, 7, 21, 11], "total_tokens": 243, "fetch_s": 1.171, "encode_s": 0.2876}, {"model": "qwen2.5-7b", "hf_repo": "Qwen/Qwen2.5-7B-Instruct", "hf_commit": "a09a35458c702b33eeacc393d103063234e8bc28", "status": "measured", "tokenizer_sha256": "c0382117ea329cdf097041132f6d735924b697924d6f6fc3945713e96ce87539", "tokenizer_bytes": 7031645, "vocab_size": 151665, "counts": [16, 16, 30, 5, 29, 37, 45, 5, 21, 7, 21, 11], "total_tokens": 243, "fetch_s": 1.166, "encode_s": 0.2745}, {"model": "qwen2.5-7b-awq", "hf_repo": "Qwen/Qwen2.5-7B-Instruct-AWQ", "hf_commit": "b25037543e9394b818fdfca67ab2a00ecc7dd641", "status": "measured", "tokenizer_sha256": "c0382117ea329cdf097041132f6d735924b697924d6f6fc3945713e96ce87539", "tokenizer_bytes": 7031645, "vocab_size": 151665, "counts": [16, 16, 30, 5, 29, 37, 45, 5, 21, 7, 21, 11], "total_tokens": 243, "fetch_s": 1.159, "encode_s": 0.2752}, {"model": "qwen3-4b", "hf_repo": "Qwen/Qwen3-4B", "hf_commit": "1cfa9a7208912126459214e8b04321603b3df60c", "status": "measured", "tokenizer_sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4", "tokenizer_bytes": 11422654, "vocab_size": 151669, "counts": [16, 16, 30, 5, 29, 37, 45, 5, 21, 7, 21, 8], "total_tokens": 240, "fetch_s": 2.71, "encode_s": 0.3752}, {"model": "qwen3-8b", "hf_repo": "Qwen/Qwen3-8B", "hf_commit": "b968826d9c46dd6066d109eabc6255188de91218", "status": "measured", "tokenizer_sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4", "tokenizer_bytes": 11422654, "vocab_size": 151669, "counts": [16, 16, 30, 5, 29, 37, 45, 5, 21, 7, 21, 8], "total_tokens": 240, "fetch_s": 2.792, "encode_s": 0.3379}, {"model": "r1-distill-qwen-1.5b", "hf_repo": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B", "hf_commit": "ad9f0ae0864d7fbcd1cd905e3c6c5b069cc8b562", "status": "measured", "tokenizer_sha256": "88145e3c3249adc2546ede277e9819d6e405e19072456e4b521cbc724bd60773", "tokenizer_bytes": 7031660, "vocab_size": 151665, "counts": [16, 16, 30, 5, 29, 37, 45, 15, 21, 7, 4, 8], "total_tokens": 233, "fetch_s": 1.178, "encode_s": 0.2738}, {"model": "r1-distill-qwen-7b", "hf_repo": "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", "hf_commit": "916b56a44061fd5cd7d6a8fb632557ed4f724f60", "status": "measured", "tokenizer_sha256": "88145e3c3249adc2546ede277e9819d6e405e19072456e4b521cbc724bd60773", "tokenizer_bytes": 7031660, "vocab_size": 151665, "counts": [16, 16, 30, 5, 29, 37, 45, 15, 21, 7, 4, 8], "total_tokens": 233, "fetch_s": 1.38, "encode_s": 0.2718}, {"model": "llama3.2-1b", "hf_repo": "meta-llama/Llama-3.2-1B-Instruct", "hf_commit": "9213176726f574b556790deb65791e0c5aa438b6", "status": "blocked", "reason": "HTTP 401: gated, needs HF_TOKEN and an accepted licence"}, {"model": "llama3.2-3b", "hf_repo": "meta-llama/Llama-3.2-3B-Instruct", "hf_commit": "0cb88a4f764b7a12671c53f0838cd831a0843b95", "status": "blocked", "reason": "HTTP 401: gated, needs HF_TOKEN and an accepted licence"}, {"model": "llama3.1-8b", "hf_repo": "meta-llama/Llama-3.1-8B-Instruct", "hf_commit": "0e9e39f249a16976918f6564b8830bc894c89659", "status": "blocked", "reason": "HTTP 401: gated, needs HF_TOKEN and an accepted licence"}, {"model": "mistral-7b-v0.3", "hf_repo": "mistralai/Mistral-7B-Instruct-v0.3", "hf_commit": "c170c708c41dac9275d15a8fff4eca08d52bab71", "status": "measured", "tokenizer_sha256": "e553af6fff7d7ad76e830608b218c5c0b0822998d5a1a96099a74cd3c1cb1a49", "tokenizer_bytes": 1961548, "vocab_size": 32768, "counts": [18, 23, 57, 24, 39, 41, 81, 17, 27, 5, 30, 12], "total_tokens": 374, "fetch_s": 0.548, "encode_s": 0.0798}, {"model": "gemma2-2b", "hf_repo": "google/gemma-2-2b-it", "hf_commit": "299a8560bedf22ed1c72a8a11e7dce4a7f9f51f8", "status": "blocked", "reason": "HTTP 401: gated, needs HF_TOKEN and an accepted licence"}], "pairs": [{"claimed": "qwen2.5-7b", "served": "qwen2.5-1.5b", "case": "smaller sibling under the flagship name", "expected": "Same tokenizer, so PW-01 and ID-06 cannot separate. Needs ID-03, ID-01 or CF-01.", "separates": "no", "items_that_differ": [], "margin_tokens": 0}, {"claimed": "qwen2.5-7b", "served": "qwen2.5-7b-awq", "case": "4-bit copy of the right model", "expected": "Same tokenizer and template. Only ID-01 and QZ-02 have a chance; 4-bit is detectable, 8-bit is not.", "separates": "no", "items_that_differ": [], "margin_tokens": 0}, {"claimed": "qwen3-8b", "served": "qwen2.5-7b", "case": "previous generation under the new name", "expected": "Tokenizers are close; PW-01 may separate on think tags. BH-01 should.", "separates": "yes", "items_that_differ": ["think-tags"], "margin_tokens": 3}, {"claimed": "r1-distill-qwen-7b", "served": "qwen2.5-7b", "case": "chat model sold as the reasoner (the documented shadow-API case)", "expected": "BH-01 decides it: no reasoning block, no reasoning tokens.", "separates": "yes", "items_that_differ": ["chatml-control", "deepseek-control", "think-tags"], "margin_tokens": 30}, {"claimed": "qwen3-8b", "served": "qwen3-8b (thinking off)", "case": "right weights, reasoning switched off", "expected": "BH-01 only; every weight-identity check passes.", "separates": "n/a", "reason": "same weights in a different configuration; not a tokenizer question"}, {"claimed": "llama3.1-8b", "served": "llama3.2-3b", "case": "smaller sibling, same tokenizer generation", "expected": "PW-01 cannot separate; needs ID-03 or CF-01. Gated: needs a Hugging Face token.", "separates": "not run", "reason": "one side not measured"}, {"claimed": "mistral-7b-v0.3", "served": "qwen2.5-7b", "case": "another family entirely", "expected": "PW-01 and ID-06 should both separate in one cheap call.", "separates": "yes", "items_that_differ": ["ascii-prose", "cjk", "emoji-modifiers", "repeated-whitespace", "url", "code-block", "rare-script", "chatml-control", "llama3-control", "mistral-control", "deepseek-control", "think-tags"], "margin_tokens": 135}], "indistinguishable_groups": [["qwen2.5-0.5b", "qwen2.5-1.5b", "qwen2.5-3b", "qwen2.5-7b", "qwen2.5-7b-awq"], ["qwen3-4b", "qwen3-8b"], ["r1-distill-qwen-1.5b", "r1-distill-qwen-7b"]]}, "smoke-ollama-qwen2.5-0.5b": {"kind": "reference-measurement/v1", "battery": "smoke-12-v0 (the 2 Oct toy battery; prompts sealed in run 8ca35b9b)", "model": "qwen2.5:0.5b (Ollama Q4_K_M)", "machine": "Intel Core i9-9980HK CPU, no GPU, Ollama 0.24.0", "prompts": 12, "samples_per_prompt": 3, "generations": 36, "wall_time_s": 31.0, "wall_time_source": "shell `time` around the harness: real 0m30.987s", "prompt_tokens": 1662, "completion_tokens": 1170, "determinism": {"prompts_identical_across_samples": 12, "prompts": 12}, "stopped_at_token_limit": 3, "published_run": "8ca35b9b7b16f5968a713efbed9f2c00dc080ee46cb65085318df909756123d5", "completion_tokens_per_s_overall": 37.7, "published_at_utc": "2026-10-01T19:50:47Z", "published_at_source": "timestamp signed into the reference-run ledger record"}}, "batteries": {"pw01-tokenizer-v1": {"kind": "battery/v1", "id": "pw01-tokenizer-v1", "check": "PW-01", "secret": false, "why_public": "Token counts come from a published tokenizer file. Publishing the strings lets anyone reproduce the reference; there is nothing a provider can tune against.", "method": "Encode each string with the model's own tokenizer.json at the pinned commit, add_special_tokens=False. The reference is the vector of 12 counts. An endpoint is compared by its billed prompt tokens for the same strings, minus its chat-template overhead, measured separately.", "items": [{"id": 0, "name": "ascii-prose", "text": "The quick brown fox jumps over the lazy dog, then naps until noon."}, {"id": 1, "name": "cjk", "text": "東京は日本の首都で、人口は約千四百万人です。"}, {"id": 2, "name": "emoji-modifiers", "text": "👩🏽‍💻 👨‍👩‍👧‍👦 🏳️‍🌈 👍🏿 🇮🇳"}, {"id": 3, "name": "repeated-whitespace", "text": "a                                                                b\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\tc"}, {"id": 4, "name": "url", "text": "https://huggingface.co/Qwen/Qwen2.5-7B-Instruct/blob/main/config.json?download=true#L12"}, {"id": 5, "name": "code-block", "text": "def fib(n):\n    a, b = 0, 1\n    for _ in range(n):\n        a, b = b, a + b\n    return a\n"}, {"id": 6, "name": "rare-script", "text": "ᚠᛇᚻ᛫ᛒᛦᚦ᛫ᚠᚱᚩᚠᚢᚱ ሰላም ዓለም ꦲꦏ꧀ꦱꦫꦗꦮ"}, {"id": 7, "name": "chatml-control", "text": "<|im_start|>user\nhello<|im_end|>"}, {"id": 8, "name": "llama3-control", "text": "<|begin_of_text|><|start_header_id|>user<|end_header_id|>"}, {"id": 9, "name": "mistral-control", "text": "[INST] hello [/INST]"}, {"id": 10, "name": "deepseek-control", "text": "<｜begin▁of▁sentence｜><｜User｜>hello<｜Assistant｜>"}, {"id": 11, "name": "think-tags", "text": "<think>\nreasoning goes here\n<\/think>"}]}}}</script>
+<script>
+(function () {
+  const { plan, runs, batteries } = JSON.parse(document.getElementById("data").textContent);
+  const pw = runs["pw01-tokenizer-v1"];
+  const pwBy = Object.fromEntries((pw ? pw.models : []).map(m => [m.model, m]));
+  const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const pill = (state, text, title) => `<span class="pill s-${state}" title="${esc(title || "")}">${esc(text || state)}</span>`;
+  const gb = n => n == null ? "" : n.toFixed(1);
+
+  document.getElementById("updated").textContent = "plan updated " + plan.updated + (pw ? " · PW-01 measured " + pw.measured_at_utc.replace("T", " ").replace("Z", " UTC") : "");
+
+  function cell(model, bat) {
+    if (bat.id === "pw01-tokenizer-v1") {
+      const r = pwBy[model.id];
+      if (r && r.status === "measured") return pill("measured", r.total_tokens + " tok", "sha256 " + r.tokenizer_sha256);
+      if (r && r.status === "blocked") return pill("blocked", "gated", r.reason);
+      return pill("planned");
+    }
+    if (bat.id === "bh01-reasoning-v1" && !model.reasoning) return pill("na", "n/a", "not a reasoning model");
+    if (bat.id === "qz02-quant-v1") {
+      if (model.id.endsWith("-awq")) return pill("na", "is copy", "this is the 4-bit copy QZ-02 compares against");
+      if (!plan.models.some(m => m.id === model.id + "-awq")) return pill("na", "n/a", "no 4-bit copy pinned yet");
+    }
+    if (bat.status === "later") return pill("later");
+    if (model.gated) return pill("blocked", "gated", "needs a Hugging Face token and an accepted licence");
+    return pill("planned", "planned", bat.status === "to author" ? "battery not written yet; needs a GPU run" : "");
+  }
+
+  function fits(model, gpu) {
+    if (model.weights_gb_16bit == null) return gpu.id === "l4" ? pill("yes", "yes", "4-bit copy, smaller than the 16-bit model") : pill("notrun", "?", "not checked");
+    return model.weights_gb_16bit <= 0.8 * gpu.memory_gb ? pill("yes", "yes") : pill("no", "no", `${gb(model.weights_gb_16bit)} GB of weights > 80% of ${gpu.memory_gb} GB`);
+  }
+
+  // Summary tiles.
+  const measured = (pw ? pw.models : []).filter(m => m.status === "measured").length;
+  const blocked = (pw ? pw.models : []).filter(m => m.status === "blocked").length;
+  const authored = plan.batteries.filter(b => b.status === "authored").length;
+  const gpuRuns = Object.values(runs).filter(r => /L4|T4|GPU/.test(r.machine || "") && !/no GPU|CPU only/.test(r.machine || "")).length;
+  const tiles = [
+    [plan.models.length, "models in the plan"],
+    [`${measured} / ${blocked}`, "PW-01 measured / blocked"],
+    [`${authored} of ${plan.batteries.length}`, "batteries written"],
+    [Object.keys(runs).length, "reference runs recorded"],
+    [gpuRuns, "runs on a GPU"],
+    [0, "provider endpoints checked"],
+  ];
+  document.getElementById("tiles").innerHTML = tiles.map(([v, l]) => `<div class="tile"><b>${esc(v)}</b><span>${esc(l)}</span></div>`).join("");
+
+  document.getElementById("legend").innerHTML = [
+    pill("measured") + " reference measured",
+    pill("planned") + " planned, needs a battery and a GPU run",
+    pill("blocked", "gated") + " needs access first",
+    pill("na", "n/a") + " doesn't apply",
+    pill("later") + " after the others",
+  ].join("");
+
+  // Matrix.
+  const l4 = plan.gpus.find(g => g.id === "l4"), t4 = plan.gpus.find(g => g.id === "t4");
+  let m = "<thead><tr><th>Model</th><th>Params</th><th>16-bit GB</th><th>Fits L4</th><th>Fits T4</th>";
+  m += plan.batteries.map(b => `<th class="check" title="${esc(b.what)}">${esc(b.check)}<span class="sub">${b.secret ? "sealed" : "public"}</span></th>`).join("");
+  m += "</tr></thead><tbody>";
+  for (const model of plan.models) {
+    m += `<tr><td class="model">${esc(model.id)}<span class="sub">${esc(model.hf_repo)} @ ${esc(model.hf_commit.slice(0, 7))} · ${esc(model.license)}</span></td>`;
+    m += `<td class="r num">${(model.params / 1e9).toFixed(2)}B</td><td class="r num">${model.weights_gb_16bit == null ? "4-bit" : gb(model.weights_gb_16bit)}</td>`;
+    m += `<td class="c">${fits(model, l4)}</td><td class="c">${fits(model, t4)}</td>`;
+    m += plan.batteries.map(b => `<td class="c">${cell(model, b)}</td>`).join("") + "</tr>";
+  }
+  document.getElementById("matrix").innerHTML = m + "</tbody>";
+
+  // Pairs.
+  const pwPairs = Object.fromEntries((pw ? pw.pairs : []).map(p => [p.claimed + "|" + p.served, p]));
+  let p = "<thead><tr><th>Sold as</th><th>Actually served</th><th>Case</th><th>PW-01 (measured)</th><th>What should decide it</th></tr></thead><tbody>";
+  for (const pair of plan.pairs) {
+    const r = pwPairs[pair.claimed + "|" + pair.served];
+    let res = pill("notrun", "not run");
+    if (r && r.separates === "yes") res = pill("yes", "separates") + `<span class="sub">on ${esc(r.items_that_differ.join(", "))}</span>`;
+    else if (r && r.separates === "no") res = pill("no", "can't tell") + `<span class="sub">identical counts</span>`;
+    else if (r && r.separates === "n/a") res = pill("na", "n/a") + `<span class="sub">${esc(r.reason)}</span>`;
+    else if (r) res = pill("notrun", "not run") + `<span class="sub">${esc(r.reason || "")}</span>`;
+    p += `<tr><td class="model">${esc(pair.claimed)}</td><td class="model">${esc(pair.served)}</td><td>${esc(pair.case)}</td><td>${res}</td><td>${esc(pair.expected)}</td></tr>`;
+  }
+  document.getElementById("pairs").innerHTML = p + "</tbody>";
+
+  // Counts grid.
+  if (pw) {
+    const rows = pw.models.filter(r => r.status === "measured");
+    const base = rows[0];
+    const names = batteries[pw.battery].items.map(item => item.name);
+    let c = "<thead><tr><th>Model</th>" + names.map(n => `<th class="check">${esc(n)}</th>`).join("") + "<th class=\"check\">total</th><th>tokenizer.json sha256</th></tr></thead><tbody>";
+    for (const r of rows) {
+      c += `<tr><td class="model">${esc(r.model)}</td>` + r.counts.map((v, i) => `<td class="c num${v !== base.counts[i] ? " diff" : ""}">${v}</td>`).join("");
+      c += `<td class="c num">${r.total_tokens}</td><td class="mono">${esc(r.tokenizer_sha256.slice(0, 16))}…</td></tr>`;
+    }
+    for (const r of pw.models.filter(r => r.status !== "measured")) {
+      c += `<tr><td class="model">${esc(r.model)}</td><td colspan="${names.length + 2}">${pill("blocked", "gated", r.reason)}</td></tr>`;
+    }
+    document.getElementById("counts").innerHTML = c + "</tbody>";
+  }
+
+  // Runs.
+  let rr = "<thead><tr><th>Run</th><th>Machine</th><th>Scope</th><th>Wall time</th><th>Prompt tok</th><th>Completion tok</th><th>Tok/s</th><th>Determinism</th></tr></thead><tbody>";
+  for (const [id, r] of Object.entries(runs)) {
+    if (r.models) {
+      const ms = r.models.filter(x => x.status === "measured");
+      const t = ms.reduce((a, x) => a + x.fetch_s + x.encode_s, 0);
+      rr += `<tr><td class="model">${esc(id)}<span class="sub">${esc(r.check)} · ${esc(r.measured_at_utc)}</span></td><td>${esc(r.machine)}</td><td>${ms.length} models, ${r.models.length - ms.length} blocked</td><td class="r num">${t.toFixed(1)} s<span class="sub">download + encode</span></td><td class="r num">${ms.reduce((a, x) => a + x.total_tokens, 0)}<span class="sub">counted, not generated</span></td><td class="r">–</td><td class="r">–</td><td class="r">exact by construction</td></tr>`;
+    } else {
+      const d = r.determinism || {};
+      rr += `<tr><td class="model">${esc(id)}<span class="sub">${esc(r.battery)} · published ${esc(r.published_at_utc || "")}</span></td><td>${esc(r.machine)}</td><td>${r.prompts} prompts × ${r.samples_per_prompt}</td><td class="r num">${r.wall_time_s} s</td><td class="r num">${r.prompt_tokens}</td><td class="r num">${r.completion_tokens}</td><td class="r num">${r.completion_tokens_per_s_overall}</td><td class="r num">${d.prompts_identical_across_samples}/${d.prompts} identical</td></tr>`;
+    }
+  }
+  document.getElementById("runs").innerHTML = rr + "</tbody>";
+
+  // Metric definitions.
+  const titles = { reference_run: "Each reference run", validation: "Each test, on each pair", endpoint_check: "Each check of a provider endpoint" };
+  document.getElementById("metrics").innerHTML = Object.entries(plan.metrics).map(([k, rows]) =>
+    `<div><div class="eyebrow">${esc(titles[k] || k)}</div><dl class="defs">` + rows.map(([n, d]) => `<div><dt>${esc(n)}</dt><dd>${esc(d)}</dd></div>`).join("") + "</dl></div>").join("");
+
+  // Blockers.
+  const gated = plan.models.filter(x => x.gated).map(x => x.id);
+  const toWrite = plan.batteries.filter(b => b.status !== "authored").map(b => b.id);
+  document.getElementById("blockers").innerHTML = [
+    `${gated.length} gated models (${gated.join(", ")}) need a Hugging Face token with each licence accepted.`,
+    `${toWrite.length} batteries aren't written yet: ${toWrite.join(", ")}. The sealed ones are written privately and committed by root.`,
+    "No GPU run yet. Everything except PW-01 needs one; the L4 fits every model in this plan at 16 bits.",
+    "Cross-GPU agreement on a T4 only works for models up to about 3B, and in fp16 on both GPUs, because the T4 has no bf16 and 16 GB of memory.",
+    "Qwen2.5-3B-Instruct is under the Qwen research licence; check it before using its reference commercially.",
+  ].map(s => `<li>${esc(s)}</li>`).join("");
+})();
+</script>
