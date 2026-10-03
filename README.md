@@ -123,6 +123,41 @@ cargo run --release --bin tvc -- verify-reference --registry reference/registry.
 
 Known limits of this round: one model, one GPU type, one engine, and only five honest variants, so the threshold itself is noisy (the worst honest variant was flagged up to 45% of the time on one test). The literature review behind these choices (the 24 papers we were given plus later work) is [`docs/reference-tests-literature.md`](docs/reference-tests-literature.md).
 
+## Calibrations and audits a customer can check (protocol v2)
+
+A reference on its own doesn't settle a verdict about a provider. Three more things need to be checkable: that the thresholds came from honest serving variants, that they were fixed before the provider was tested, and that the provider's prompts weren't picked by hand. Protocol v2 adds a document for each step (the formats are in [`docs/spec.md`](docs/spec.md)):
+
+| Document | What it records |
+|---|---|
+| `battery/v1` | One test: its sealed prompt pool, how many prompts an audit draws, decoding, and the statistic's code by file digest |
+| `honest-set/v1` | The honest serving variants of the same weights, and what each one changes |
+| `calibration/v1` | The threshold per battery and samples per prompt, the honest false-positive rate, the measured power against named substitutes and partial routing, and what it can't detect |
+| `audit/v1` | One endpoint in one time window: the calibrations it's judged by, the drawn prompt indices, a sealed root of the responses, each statistic, the T0 result and the verdict |
+
+The Qwen2.5-7B reference is now published this way as profile `ef0b8e42`: 4 batteries, 4 honest sets of 5 variants, 4 calibrations with power against 6 alternatives, 78 documents in all. Prompts and outputs stay sealed; 283 sample strings were checked against the published objects and none appear.
+
+```bash
+cargo run --release --bin tvc -- verify-reference --registry reference/registry.jsonl \
+  --profile ef0b8e428ac37ed8b83fdbab395be33ee5cbafc8d8ac38251d220bf643f17f56 \
+  --publisher 8f738e4f8e4b3ce2b820dcc9cea88635f0992a56f23eccbc4b5a8d968db421cd
+```
+
+`tvc verify-audit` checks an audit in twelve steps. The ones that matter to a customer:
+- **The thresholds came first.** Every calibration the audit cites is earlier in the ledger, and an anchor proof made before the audit was recorded covers it. `tvc anchor` now keeps every proof in `reference/anchors/`, so that evidence isn't overwritten.
+- **The prompts weren't picked.** Each battery's indices re-derive from its sealed pool and a context built from the endpoint, the day and the battery (`tvc audit-draw` prints them).
+- **The verdict follows from the numbers.** Every threshold is the calibration's, and every verdict is recomputed. When the prompt-token check (T0) fails, the verdict must be `misconfigured`, never a swapped model.
+- **Any one answer can be opened.** `tvc reveal` on the audit's sealed responses, checked with `--reveal`.
+
+Two demo audits are in the ledger. No provider was queried: each "endpoint" is a stored GPU run standing in for one, and the audit says so. Provider A is the 4-bit AWQ copy. Its T1 statistic is 0.1983 against a threshold of 0.1239 and its T3 statistic 0.0259 against 0.0009, so the verdict is `inconsistent-with-declared-configuration`. Provider B is the real weights with CUDA graphs off. It's inside both bands, so the verdict is `consistent`.
+
+```bash
+cargo run --release --bin tvc -- verify-audit --registry reference/registry.jsonl \
+  --audit 241d9fca72893b44f6635e5088c4d69ed53f0ebb6e4d93b4decbd1805cafb00a \
+  --publisher 8f738e4f8e4b3ce2b820dcc9cea88635f0992a56f23eccbc4b5a8d968db421cd
+```
+
+The scripts that built these are [`reference/gpu/publish_v2.py`](reference/gpu/publish_v2.py) and [`reference/gpu/demo_audit.py`](reference/gpu/demo_audit.py). The design notes are in [`docs/planning-prompt-protocol-v2.md`](docs/planning-prompt-protocol-v2.md). Still to build: retiring prompts once revealed, batching thousands of audits a day into one ledger record, analyst keys, and a fully public battery anyone can rerun to check our samples.
+
 ## What a check proves, and what it doesn't
 
 A passing `verify-reference` means:
@@ -169,8 +204,8 @@ Roughly in order:
 
 1. SPOT's reference harness emits these documents directly, with bands keyed by catalogue check id (PW-01, ID-06, BH-01 and so on).
 2. References for the open models OpenRouter resells most (gpt-oss, Gemma 4, Qwen 3.x, Llama 3.3), on more than one GPU type, then the same batteries run against each third-party provider to count how many serve something other than the model they name.
-3. Fiat-Shamir item selection in the check runner, so which committed prompts a check uses is derived from the commitment, the endpoint and the date. `tvc sample` already does the derivation.
-4. Check results in the ledger, signed by the analyst. They'll most likely be recorded as raw signal values with the verdict on top, so a wrong call can be corrected without rewriting history.
+3. Audits of real providers in the ledger, drawn and judged as above, with revealed prompts retired from the pool and many audits batched into one record.
+4. A public calibration battery: prompts and reference samples both published, so anyone with a GPU can check our samples against theirs.
 5. Key management: an org key, analyst keys, key rotation records, and the public key published on authenticated.si.
 6. References run inside a confidential GPU with the weights measured.
 
@@ -186,7 +221,9 @@ Roughly in order:
 | `sample` | Pick items from a committed set in a way nobody can steer. |
 | `publish`, `show` | Sign a document into the ledger, and print one back. |
 | `verify-reference` | Check a profile and everything it cites, check by check. |
-| `anchor`, `verify-anchor` | Timestamp the ledger head, and follow the proof to a Bitcoin block. |
+| `audit-draw` | Print the prompt indices an audit must use from a battery. |
+| `verify-audit` | Check an audit: calibration first, prompts not picked, verdict follows from the numbers. |
+| `anchor`, `verify-anchor` | Timestamp the ledger head (every proof is kept in `anchors/`), and follow the proofs to a Bitcoin block. |
 | `audit` | Re-derive every digest in the ledger and list its records. |
 | `demo` | All of the above, offline, with the cheating attempts at the end. |
 | `keygen`, `commit`, `register`, `get`, `verify` | The earlier weight-commitment flow; see `docs/weight-commitment.md`. |
@@ -200,7 +237,8 @@ tvc-core/src/
   canonical.rs     canonical JSON and content digests
   manifest.rs      per-file weight manifests
   itemset.rs       salted item commitments, reveals, Fiat-Shamir selection
-  documents.rs     the four reference kinds, and the object store
+  documents.rs     the reference kinds (v1, and v2 batteries, calibrations, audits), the object store
+  audit.rs         how an audit draws its prompts and reaches its verdict
   registry.rs      the append-only ledger (model registrations v2, documents v3)
   signer.rs        BIP-340 keys, registrations, document claims
   commitment.rs    the quantised weight commitment and its Merkle tree
@@ -208,9 +246,10 @@ tvc-core/src/
 tvc-cli/src/
   main.rs          the tvc binary
   reference.rs     manifest, publish, reveal and verify-reference commands
+  audit.rs         audit-draw and verify-audit
   hf.rs            the Hugging Face comparison
   anchor.rs        OpenTimestamps submission, parsing and upgrade
-reference/         the real ledger (Qwen2.5-0.5B and Qwen2.5-7B references)
+reference/         the real ledger (Qwen2.5-0.5B and Qwen2.5-7B references, demo audits), anchors/
 reference/gpu/     the GPU harness (vLLM, batteries T0-T4) and its results
 docs/              spec, verify-yourself walkthrough, demo script, earlier README
 ```

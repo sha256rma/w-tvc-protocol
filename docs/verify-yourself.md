@@ -123,6 +123,27 @@ upgraded proof, saves it, and prints a block height and a merkle root. Open that
 block on any block explorer and compare the merkle root. If they match, every
 record in the ledger existed before that block was mined.
 
+Every proof `tvc anchor` has made is kept in `reference/anchors/`, and
+`verify-anchor` lists each one with the last record it covers. The first one,
+covering records 0 to 12, is in Bitcoin block 969564.
+
+## 7. An audit was judged by thresholds fixed in advance
+
+```bash
+tvc verify-audit --registry reference/registry.jsonl \
+  --audit 241d9fca72893b44f6635e5088c4d69ed53f0ebb6e4d93b4decbd1805cafb00a \
+  --publisher 8f738e4f8e4b3ce2b820dcc9cea88635f0992a56f23eccbc4b5a8d968db421cd
+```
+
+This is a demo audit: the "endpoint" is the stored 4-bit AWQ run, standing in
+for a provider, and the document says so. The command checks that the T1 and T3
+calibrations it cites were in the ledger, and covered by an anchor, before the
+audit was recorded. It re-derives which prompts the audit had to use from the
+sealed pools, the endpoint and the date, and recomputes every verdict from the
+published statistics and thresholds. The tests in `tvc-cli/src/audit.rs` show it
+failing: an edited threshold or a flipped verdict exits 9, hand-picked prompts
+exit 8, and a calibration nobody saw before the audit exits 6.
+
 ## What this doesn't show
 
 The setup record is the publisher's description of their own run. Nothing here
