@@ -7,9 +7,9 @@
 //!
 //! An audit is fair when three things hold, and `verify-audit` checks each:
 //!
-//! 1. The thresholds were fixed first. The calibration the audit is judged
-//!    against sits earlier in the ledger, and an anchor proof made before the
-//!    audit was recorded covers it.
+//! 1. The thresholds were fixed first. The calibrations the audit is judged
+//!    against sit earlier in the ledger, and an anchor proof made before the
+//!    audit was recorded covers them.
 //! 2. The prompts weren't picked. Each battery's indices re-derive from its
 //!    committed pool and a context built from the endpoint, the day and the
 //!    battery, so the auditor had no choice to make.
@@ -231,22 +231,26 @@ fn check_audit(
     reveals: &[PathBuf],
     checks: &mut AuditChecks,
 ) {
-    // 1. The calibration came first, and the outside world saw it first.
-    let calibration = digest_of(&audit["calibration"]);
-    let calibration_sequence = calibration
-        .and_then(|d| registry.get_document(&d))
-        .map(|record| record.sequence);
-    match calibration_sequence {
-        Some(sequence) if sequence < audit_sequence => {
-            checks.order.pass(format!("calibration is record {sequence}, the audit record {audit_sequence}"));
-            check_anchored_first(ledger, registry, sequence, audit_sequence, checks.anchored);
+    // 1. The calibrations came first, and the outside world saw them first.
+    let calibrations: Vec<[u8; 32]> = audit["calibrations"].as_array().into_iter().flatten().filter_map(digest_of).collect();
+    let sequences: Option<Vec<u64>> = calibrations
+        .iter()
+        .map(|d| registry.get_document(d).map(|record| record.sequence))
+        .collect();
+    match sequences.as_ref().and_then(|s| s.iter().max().copied()) {
+        Some(latest) if latest < audit_sequence => {
+            checks.order.pass(format!(
+                "{} calibration(s), the latest record {latest}; the audit is record {audit_sequence}",
+                calibrations.len()
+            ));
+            check_anchored_first(ledger, registry, latest, audit_sequence, checks.anchored);
         }
-        Some(sequence) => {
-            checks.order.fail(format!("calibration is record {sequence}, after the audit (record {audit_sequence})"));
-            checks.anchored.skip("the calibration is not earlier than the audit");
+        Some(latest) => {
+            checks.order.fail(format!("a calibration is record {latest}, after the audit (record {audit_sequence})"));
+            checks.anchored.skip("a calibration is not earlier than the audit");
         }
         None => {
-            checks.order.fail("the calibration is not in the ledger");
+            checks.order.fail("a calibration is not in the ledger");
             checks.anchored.skip("no calibration");
         }
     }
@@ -290,10 +294,12 @@ fn check_audit(
 
     // 3. Thresholds come from the calibration; verdicts follow from them.
     let t0 = audit["t0"]["matches"].as_bool().unwrap_or(false);
-    let main = judge(&audit["results"], calibration.and_then(|d| docs.get(&d).copied()), t0, checks);
+    let lookup = |list: &Value| -> Option<Vec<&Value>> {
+        list.as_array()?.iter().map(|d| digest_of(d).and_then(|d| docs.get(&d).copied())).collect()
+    };
+    let main = judge(&audit["results"], lookup(&audit["calibrations"]), t0, checks);
     let better = audit.get("better_match").map(|better| {
-        let calibration = digest_of(&better["calibration"]).and_then(|d| docs.get(&d).copied());
-        judge(&better["results"], calibration, true, checks)
+        judge(&better["results"], lookup(&better["calibrations"]), true, checks)
             .is_some_and(|verdicts| verdicts.iter().all(|v| *v == "inside-band"))
     });
     if let Some(verdicts) = main {
@@ -343,16 +349,17 @@ fn check_audit(
     checks.opened.pass(opened.join(", "));
 }
 
-/// Checks a results list against a calibration and recomputes each battery
-/// verdict. Returns the recomputed verdicts, or `None` if the calibration is missing.
-fn judge(results: &Value, calibration: Option<&Value>, t0: bool, checks: &mut AuditChecks) -> Option<Vec<&'static str>> {
-    let Some(calibration) = calibration else {
-        checks.thresholds.fail("the calibration could not be read");
+/// Checks a results list against the calibrations it cites and recomputes
+/// each battery verdict. Returns the recomputed verdicts, or `None` if a
+/// calibration is missing.
+fn judge(results: &Value, calibrations: Option<Vec<&Value>>, t0: bool, checks: &mut AuditChecks) -> Option<Vec<&'static str>> {
+    let Some(calibrations) = calibrations else {
+        checks.thresholds.fail("a calibration could not be read");
         checks.verdict.skip("no calibration");
         return None;
     };
     let mut table: BTreeMap<(String, u64), String> = BTreeMap::new();
-    for entry in calibration["entries"].as_array().into_iter().flatten() {
+    for entry in calibrations.iter().flat_map(|c| c["entries"].as_array().into_iter().flatten()) {
         if let (Some(battery), Some(k), Some(threshold)) =
             (entry["battery"].as_str(), entry["k"].as_u64(), entry["threshold"].as_str())
         {
@@ -365,7 +372,7 @@ fn judge(results: &Value, calibration: Option<&Value>, t0: bool, checks: &mut Au
         let k = result["k"].as_u64().unwrap_or(0);
         let short = &battery[..battery.len().min(16)];
         let Some(threshold) = table.get(&(battery.to_owned(), k)) else {
-            checks.thresholds.fail(format!("the calibration has no threshold for battery {short} at k={k}"));
+            checks.thresholds.fail(format!("no cited calibration has a threshold for battery {short} at k={k}"));
             continue;
         };
         let published = result["threshold"].as_str().unwrap_or("");
@@ -523,7 +530,7 @@ mod tests {
         let verdict = battery_verdict(statistic, "0.12", t0).unwrap();
         json!({"kind": "audit/v1", "endpoint": endpoint(),
                "window": {"start": start, "end": "2026-10-04T09:20:00Z"},
-               "calibration": hex::encode(&f.calibration),
+               "calibrations": [hex::encode(&f.calibration)],
                "draws": [{"battery": hex::encode(&f.battery), "k": 8, "indices": indices}],
                "responses": {"root": d(30), "count": 160},
                "results": [{"battery": hex::encode(&f.battery), "k": 20, "statistic": statistic, "threshold": "0.12", "verdict": verdict}],
@@ -591,7 +598,7 @@ mod tests {
             publish(&f.ledger, &f.key, doc)
         };
         let mut audit = audit_doc(&f, "0.05");
-        audit["calibration"] = json!(hex::encode(&late));
+        audit["calibrations"] = json!([hex::encode(&late)]);
         let audit = publish(&f.ledger, &f.key, audit);
         assert_eq!(verify(&f, audit), exit::ANCHOR);
         // Anchoring afterwards does not help: the proof also covers the audit.
@@ -620,7 +627,7 @@ mod tests {
     fn different_model_needs_a_better_match_inside_its_band() {
         let f = fixture("better");
         let mut doc = audit_doc(&f, "0.3");
-        doc["better_match"] = json!({"calibration": hex::encode(&f.better_calibration),
+        doc["better_match"] = json!({"calibrations": [hex::encode(&f.better_calibration)],
             "results": [{"battery": hex::encode(&f.battery), "k": 20, "statistic": "0.1", "threshold": "0.15", "verdict": "inside-band"}]});
         doc["verdict"] = json!("different-model");
         let audit = publish(&f.ledger, &f.key, doc.clone());

@@ -504,9 +504,15 @@ pub fn verify_reference(
             .flatten()
             .filter_map(get)
             .collect();
-        let honest_set = profile_document.and_then(|p| p.get("honest_set")).and_then(get);
+        let calibrations: Vec<&Value> = profile_document
+            .and_then(|p| p["calibrations"].as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(get)
+            .collect();
+        let honest_sets: Vec<&Value> = calibrations.iter().filter_map(|c| get(&c["honest_set"])).collect();
         let mut own_setups: Vec<&Value> = Vec::new();
-        if let Some(set) = honest_set {
+        for set in &honest_sets {
             own_runs.extend(get(&set["reference_run"]));
             for member in set["members"].as_array().into_iter().flatten() {
                 own_runs.extend(get(&member["run"]));
@@ -541,12 +547,13 @@ pub fn verify_reference(
                 }
             }
             if profile_document.is_some_and(|p| p["maturity"] == "full") {
-                let members = honest_set.and_then(|s| s["members"].as_array()).map_or(0, Vec::len);
-                let substitutes: BTreeSet<&str> = profile_document
-                    .and_then(|p| p["calibrations"].as_array())
-                    .into_iter()
-                    .flatten()
-                    .filter_map(get)
+                let members = honest_sets
+                    .iter()
+                    .map(|s| s["members"].as_array().map_or(0, Vec::len))
+                    .min()
+                    .unwrap_or(0);
+                let substitutes: BTreeSet<&str> = calibrations
+                    .iter()
                     .flat_map(|c| c["entries"].as_array().into_iter().flatten())
                     .flat_map(|e| e["power"].as_array().into_iter().flatten())
                     .filter_map(|p| p["against"].as_str())

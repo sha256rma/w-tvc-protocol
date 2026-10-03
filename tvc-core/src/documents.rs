@@ -21,8 +21,8 @@
 //!   reference-run/v2      run v1 plus its battery and evidence-log digest
 //!   honest-set/v1         honest serving variants of the same weights
 //!   calibration/v1        threshold per battery and budget, honest FPR, power
-//!   audit/v1              one endpoint, one window: draws, statistics, verdict
-//!   profile/v2            profile v1 plus its honest set and calibrations
+//!   audit/v1              one endpoint, one window: calibrations, draws, statistics, verdict
+//!   profile/v2            profile v1 plus its calibrations
 //! ```
 //!
 //! [`validate_document`] checks a document's fields and that each reference
@@ -69,7 +69,8 @@ pub const KIND_HONEST_SET: &str = "honest-set/v1";
 pub const KIND_CALIBRATION: &str = "calibration/v1";
 /// Document kind for one check of one endpoint in one time window.
 pub const KIND_AUDIT: &str = "audit/v1";
-/// Document kind for a profile that also names its honest set and calibrations.
+/// Document kind for a profile that also names its calibrations (each of
+/// which names its honest set).
 pub const KIND_PROFILE_V2: &str = "profile/v2";
 
 /// Either version of a reference setup.
@@ -273,9 +274,6 @@ pub fn refs_of(kind: &str, document: &Value) -> Result<Vec<[u8; 32]>> {
                 refs.push(digest(kind, Some(run), "runs[]")?);
             }
             if kind == KIND_PROFILE_V2 {
-                if let Some(set) = document.get("honest_set") {
-                    refs.push(digest(kind, Some(set), "honest_set")?);
-                }
                 for calibration in array(kind, document, "calibrations")? {
                     refs.push(digest(kind, Some(calibration), "calibrations[]")?);
                 }
@@ -304,12 +302,17 @@ pub fn refs_of(kind: &str, document: &Value) -> Result<Vec<[u8; 32]>> {
             Ok(dedup(refs))
         }
         KIND_AUDIT => {
-            let mut refs = vec![digest(kind, document.get("calibration"), "calibration")?];
+            let mut refs = Vec::new();
+            for calibration in array(kind, document, "calibrations")? {
+                refs.push(digest(kind, Some(calibration), "calibrations[]")?);
+            }
             for draw in array(kind, document, "draws")? {
                 refs.push(digest(kind, draw.get("battery"), "draws[].battery")?);
             }
             if let Some(better) = document.get("better_match") {
-                refs.push(digest(kind, better.get("calibration"), "better_match.calibration")?);
+                for calibration in array(kind, better, "calibrations")? {
+                    refs.push(digest(kind, Some(calibration), "better_match.calibrations[]")?);
+                }
             }
             Ok(dedup(refs))
         }
@@ -484,17 +487,11 @@ pub fn validate_document(
                 for run in runs {
                     expect_any(&digest(kind, Some(run), "runs[]")?, &RUN_KINDS)?;
                 }
-                if let Some(set) = document.get("honest_set") {
-                    expect(&digest(kind, Some(set), "honest_set")?, KIND_HONEST_SET)?;
-                }
                 for calibration in array(kind, document, "calibrations")? {
                     expect(&digest(kind, Some(calibration), "calibrations[]")?, KIND_CALIBRATION)?;
                 }
-                if maturity == "full"
-                    && (document.get("honest_set").is_none()
-                        || array(kind, document, "calibrations")?.is_empty())
-                {
-                    return Err(invalid(kind, "a full profile must name an honest set and a calibration"));
+                if maturity == "full" && array(kind, document, "calibrations")?.is_empty() {
+                    return Err(invalid(kind, "a full profile must name at least one calibration"));
                 }
             }
         }
@@ -579,7 +576,13 @@ pub fn validate_document(
             if text(kind, window, "end")? < text(kind, window, "start")? {
                 return Err(invalid(kind, "window.end is before window.start"));
             }
-            expect(&digest(kind, document.get("calibration"), "calibration")?, KIND_CALIBRATION)?;
+            let calibrations = array(kind, document, "calibrations")?;
+            if calibrations.is_empty() {
+                return Err(invalid(kind, "an audit must cite at least one calibration"));
+            }
+            for calibration in calibrations {
+                expect(&digest(kind, Some(calibration), "calibrations[]")?, KIND_CALIBRATION)?;
+            }
             for draw in array(kind, document, "draws")? {
                 expect(&digest(kind, draw.get("battery"), "draws[].battery")?, KIND_BATTERY)?;
                 let k = positive(kind, draw, "k")?;
@@ -598,10 +601,13 @@ pub fn validate_document(
             decimal(kind, document, "confidence")?;
             match document.get("better_match") {
                 Some(better) => {
-                    expect(
-                        &digest(kind, better.get("calibration"), "better_match.calibration")?,
-                        KIND_CALIBRATION,
-                    )?;
+                    let calibrations = array(kind, better, "calibrations")?;
+                    if calibrations.is_empty() {
+                        return Err(invalid(kind, "better_match must cite at least one calibration"));
+                    }
+                    for calibration in calibrations {
+                        expect(&digest(kind, Some(calibration), "better_match.calibrations[]")?, KIND_CALIBRATION)?;
+                    }
                     audit_results(kind, better)?;
                 }
                 None if text(kind, document, "verdict")? == "different-model" => {
@@ -919,7 +925,7 @@ mod tests {
         json!({"kind": KIND_AUDIT,
                "endpoint": {"host": "api.example.com", "model": "qwen/qwen-2.5-7b-instruct", "provider": "A"},
                "window": {"start": "2026-10-04T09:00:00Z", "end": "2026-10-04T09:20:00Z"},
-               "calibration": d(11),
+               "calibrations": [d(11)],
                "draws": [{"battery": d(4), "k": 2, "indices": [3, 17]}],
                "responses": {"root": d(8), "count": 40},
                "results": [{"battery": d(4), "k": 20, "statistic": "0.3", "threshold": "0.12", "verdict": "outside-band"}],
@@ -964,7 +970,7 @@ mod tests {
         cal["honest_set"] = json!(d(6)); // a run, not an honest set
         assert!(validate_document(KIND_CALIBRATION, &cal, &lookup).is_err());
         let mut au = audit();
-        au["calibration"] = json!(d(10));
+        au["calibrations"] = json!([d(10)]);
         assert!(validate_document(KIND_AUDIT, &au, &lookup).is_err());
         let mut run = run_v2();
         run["battery"] = json!(d(6));
@@ -1003,12 +1009,14 @@ mod tests {
     }
 
     #[test]
-    fn a_full_profile_v2_names_an_honest_set_and_a_calibration() {
+    fn a_full_profile_v2_names_a_calibration() {
         let lookup = kinds(KNOWN_V2);
         let mut profile = json!({"kind": KIND_PROFILE_V2, "model": "m", "version": "1", "maturity": "full",
-                                 "weights": d(1), "runs": [d(6)], "honest_set": d(10), "calibrations": [d(11)]});
+                                 "weights": d(1), "runs": [d(6)], "calibrations": [d(11)]});
         validate_document(KIND_PROFILE_V2, &profile, &lookup).unwrap();
-        assert_eq!(refs_of(KIND_PROFILE_V2, &profile).unwrap(), vec![[1; 32], [6; 32], [10; 32], [11; 32]]);
+        assert_eq!(refs_of(KIND_PROFILE_V2, &profile).unwrap(), vec![[1; 32], [6; 32], [11; 32]]);
+        profile["calibrations"] = json!([d(10)]); // an honest set, not a calibration
+        assert!(validate_document(KIND_PROFILE_V2, &profile, &lookup).is_err());
         profile["calibrations"] = json!([]);
         assert!(validate_document(KIND_PROFILE_V2, &profile, &lookup).is_err());
         profile["maturity"] = json!("working");
