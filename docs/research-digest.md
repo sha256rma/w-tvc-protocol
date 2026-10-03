@@ -194,9 +194,8 @@ These assume the reference comes from the same serving stack, so their low false
 | Model | Result |
 |---|---|
 | Qwen2.5-7B-Instruct (L4) | With plain p-values, MET flagged all 5 honest serving variants at p = 0.001. With thresholds at the 95th percentile over the honest set, honest variants were flagged 6–10% of the time. AWQ 4-bit, a 3B sibling and Qwen2-7B caught 100% even at 5 samples per prompt. fp8 W8A8 caught 95% at 10 per prompt. GPTQ int8 weight-only invisible. The token-count check caught an injected system prompt and the Qwen2 template |
-| Qwen3.5-9B (A100) | Honest variants flagged 0–25% (mean about 7%). The 4B and Qwen3-8B substitutes and thinking-on caught 100%. 20% routing to Qwen3-8B caught 100% (T1, T3); 20% to the 4B, T1 0.85 and T3 0.60 |
+| Qwen3.5-9B (A100) | Honest variants flagged 0–25% (mean about 7%). The 4B and Qwen3-8B substitutes and thinking-on caught 100%. 20% routing to Qwen3-8B caught 100% by both text tests; 20% to the 4B, 0.85 and 0.60 |
 | Determinism | Default kernels: 20 of 32 greedy answers identical on Qwen2.5-7B and Qwen3.5-9B; batch-invariant: 32 of 32. gpt-oss-20b: 1 of 32 with default kernels. Batch-invariant mode is unavailable for Qwen3.5 (linear attention) and gpt-oss MXFP4 on L4/A100 |
-| Round 4 (queued) | gpt-oss-120b, Qwen3.8-27B, Gemma-4-31B, Gemma-4-26B-A4B, Qwen3-30B-A3B, Mistral-Nemo, each with a seeded honest set, substitutes and an analysis |
 
 These match the literature: a different model is easy, 4-bit is caught, 8-bit weight-only is not, and the honest set decides whether a test is usable at all.
 

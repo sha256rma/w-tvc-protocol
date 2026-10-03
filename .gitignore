@@ -93,3 +93,6 @@ desktop.ini
 *.swo
 *~
 .claude/
+
+# authenticated.si private reference tests are cloned here (github.com/sha256rma/authenticated-reference-tests)
+reference/gpu/

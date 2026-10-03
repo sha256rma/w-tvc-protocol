@@ -1,12 +1,47 @@
 # W-TVC
 
-W-TVC lets a model checker prove what it ran. Into a signed, append-only log it publishes the weight files a reference run used, the settings it ran with, and commitments to the secret prompts and to the outputs. Anyone can check the log without trusting the checker, and its head is timestamped on Bitcoin.
+W-TVC is an open protocol for proving that a model check was fair. [authenticated.si](https://authenticated.si) tests the providers that sell open models (DeepSeek, Qwen, gpt-oss and others) against the real model, every day, with secret prompts. W-TVC publishes what a customer needs to trust those results, without publishing the prompts:
+- which exact weight files the reference used, checkable against Hugging Face;
+- how the reference was run;
+- sealed fingerprints of the secret prompts and answers;
+- the thresholds each test uses, the false-positive rate they give on honest providers, and what they catch;
+- every provider check: which prompts it had to use, its numbers and its verdict.
+
+All of it is signed, kept in an append-only ledger, and timestamped in Bitcoin. Anyone can verify it with one command, offline, without trusting authenticated.si.
 
 Built for **Bitshala BOSS Battle** · Tracks: **Machine Money** × **Freedom Stack**
 
 ```
 Ship code. Beat the boss.
 ```
+
+## Where it's used
+
+```mermaid
+flowchart LR
+  HF["Open weights<br/>on Hugging Face"]
+  subgraph PRIV["authenticated.si (private)"]
+    REF["Reference run on our GPU<br/>secret test prompts"]
+    CAL["Calibration<br/>thresholds from honest variants"]
+    AUD["Daily audit of each provider"]
+    REF --> CAL --> AUD
+  end
+  PROV["Providers<br/>OpenRouter and others"]
+  LED[("W-TVC ledger (public)<br/>signed fingerprints and numbers")]
+  BTC[("Bitcoin<br/>via OpenTimestamps")]
+  CUST["Customer"]
+
+  HF --> REF
+  PROV -- "answers" --> AUD
+  REF -- "manifest, setup, sealed roots" --> LED
+  CAL -- "thresholds, measured power" --> LED
+  AUD -- "draws, statistics, verdict" --> LED
+  LED -- "head" --> BTC
+  AUD -- "verdict" --> CUST
+  CUST -- "tvc verify-audit" --> LED
+```
+
+The prompts and answers stay at authenticated.si. Only salted Merkle roots of them reach the ledger. A single one is opened, with a proof, when a verdict is disputed. The sequence of a daily check, the document graph and a chart of what the tests catch are in [`docs/how-it-works.md`](docs/how-it-works.md).
 
 ## The problem
 
@@ -23,21 +58,33 @@ Today the honest answer to all four is "trust us". W-TVC replaces that with thin
 
 ## What W-TVC publishes
 
-A reference is a chain of four signed documents. Each one names the one before it by SHA-256.
+A reference is a set of signed documents, each naming the ones it builds on by SHA-256. Protocol v2 adds the documents a verdict is judged by.
 
-```
-weights-manifest/v1   every file the reference loaded: path, size, sha256       (public)
-       ▲
-reference-setup/v1    engine, version, dtype, hardware, decoding settings,
-                      chat-template and system-prompt digests                   (public, self-reported)
-       ▲
-reference-run/v1      salted Merkle roots of the prompts and of the outputs,
-                      sample counts, determinism, measured bands                (roots public, items secret)
-       ▲
-profile/v1            one handbook entry: model, version, maturity
+```mermaid
+flowchart BT
+  MAN["weights-manifest<br/>every file: path, size, sha256"]
+  SET["reference-setup<br/>engine, kernels, GPU, seed"]
+  BAT["battery<br/>sealed prompt pool, statistic code digest"]
+  RUN["reference-run<br/>sealed answers root"]
+  HON["honest-set<br/>honest variants of the same weights"]
+  CAL["calibration<br/>thresholds, honest false-positive rate, power"]
+  AUD["audit<br/>one provider, one window: draws, verdict"]
+  PRO["profile<br/>one model's reference"]
+  SET --> MAN
+  RUN --> SET
+  RUN --> BAT
+  HON --> RUN
+  CAL --> RUN
+  CAL --> HON
+  CAL --> BAT
+  AUD --> CAL
+  AUD --> BAT
+  PRO --> MAN
+  PRO --> RUN
+  PRO --> CAL
 ```
 
-The signed claims go in an append-only, hash-chained ledger (`registry.jsonl`). The documents sit beside it as `objects/<sha256>.json`, so `sha256sum` on any of them prints its own file name. The ledger head is submitted to the OpenTimestamps calendars and ends up in a Bitcoin block.
+The signed claims go in an append-only, hash-chained ledger (`registry.jsonl`). The documents sit beside it as `objects/<sha256>.json`, so `sha256sum` on any of them prints its own file name. The ledger head is submitted to the OpenTimestamps calendars and ends up in a Bitcoin block. Every proof is kept in `anchors/`.
 
 | The provider asks | What answers it | How anyone checks |
 |---|---|---|
@@ -45,6 +92,8 @@ The signed claims go in an append-only, hash-chained ledger (`registry.jsonl`). 
 | How were they run? | the setup record | It can't be changed after publication, and it's specific enough to re-run. It's the publisher's own description, and it says so. |
 | Which prompts, which answers? | the run record's two roots | When a verdict is disputed, `tvc reveal` opens the prompts in question with a Merkle proof. `tvc verify-reveal` confirms they were in the set at publication, at that position. |
 | Changed afterwards? | ledger order and the Bitcoin timestamp | A record can only cite records already in the ledger, and the anchored head dates the whole ledger up to that point. |
+| Were the thresholds fair, and set before you tested me? | the calibration | It's built from honest variants of the same weights and publishes their false-positive rate. `tvc verify-audit` checks it was anchored before the audit was recorded. |
+| Did you pick prompts to make me look bad? | the audit's draws | The indices re-derive from the sealed pool, the endpoint and the date. `tvc verify-audit` recomputes them, and the verdict. |
 
 The prompts stay secret on purpose. If they were public, a provider could recognise them and send only those to the real model. So SPOT commits to them first and reveals them one at a time, when there's a reason to. I think this is the one place where publishing everything would make the system easier to cheat.
 
@@ -90,17 +139,7 @@ The harness that produced the run is [`reference/run_ollama_reference.py`](refer
 
 ## A GPU reference, and what the tests catch: Qwen2.5-7B-Instruct
 
-The second reference was run on an NVIDIA L4 with vLLM 0.30.0, as an [OpenResearch](https://github.com/alphaXiv/OpenResearch) experiment tree: one git branch per question, one fixed run command, every number printed to the run log. The harness and the write-ups are in [`reference/gpu/`](reference/gpu/).
-
-The batteries come from published tests, so a result can be compared with the paper it came from:
-
-| | What it compares | After |
-|---|---|---|
-| T0 | prompt-token counts for eight fixed conversations | AgentProv (arXiv 2609.00052) |
-| T1 | one-word answers to 10 trivial questions in 4 languages | One Token Is Enough (arXiv 2607.10252) |
-| T2 | where one endpoint answer ranks among 100 reference answers | RUT (arXiv 2506.06975) |
-| T3 | 50-token continuations of Wikipedia snippets, kernel two-sample test | MET (arXiv 2410.20247) |
-| T4 | random bit and digit strings | IRIS (arXiv 2607.20860) |
+The second reference was run on an NVIDIA L4 with vLLM 0.30.0, as an [OpenResearch](https://github.com/alphaXiv/OpenResearch) experiment tree: one git branch per question, one fixed run command, every number printed to the run log. The harness, the prompt sets and the write-ups are authenticated.si's and live in a private repository. Each test follows a published method, so its results can be compared with the paper: prompt-token counts (AgentProv, arXiv 2609.00052), answer distributions (One Token Is Enough, arXiv 2607.10252), rank uniformity (RUT, arXiv 2506.06975), kernel two-sample tests (MET, arXiv 2410.20247) and random-generation probes (IRIS, arXiv 2607.20860).
 
 **Round 1: which engine makes the reference.** With vLLM's default kernels, 12 of 32 greedy answers changed depending on what else was in the batch. With its batch-invariant kernels, 32 of 32 stayed the same, at 5-8% lower throughput. So the reference is run batch-invariant: anyone with the same stack gets the same reference. A provider won't run that stack, so the reference is still compared as a distribution of answers, not as exact strings.
 
@@ -108,12 +147,12 @@ The batteries come from published tests, so a result can be compared with the pa
 
 - With a plain p-value, the MET test flags all five honest variants (p = 0.001). Kernel choice alone moves the output distribution enough to be seen. This matches what the literature reports for real providers.
 - With the threshold taken from the honest variants (95th percentile of the statistic, each honest variant judged only against the others), honest variants are flagged 6-10% of the time on average.
-- At that threshold, a 4-bit AWQ copy, Qwen2.5-3B and Qwen2-7B are flagged by every test at every budget down to 5 samples per prompt. Online fp8 (weights and activations) is flagged by T3 95% of the time at 10 samples per prompt.
+- At that threshold, a 4-bit AWQ copy, Qwen2.5-3B and Qwen2-7B are flagged by every test at every budget down to 5 samples per prompt. Online fp8 (weights and activations) is flagged 95% of the time at 10 samples per prompt.
 - An 8-bit weight-only copy (GPTQ int8) is not flagged by anything. It sits at the honest rate.
-- T0 alone catches an injected provider system prompt and the Qwen2 template, because both change the prompt-token count. Without that gate, the system prompt makes T1-T3 fire as if the model had been swapped.
-- Routing 10% of answers to a different model is caught by T1. Routing to a 4-bit copy needs about 20% before T3 catches it reliably.
+- The prompt-token check alone catches an injected provider system prompt and the Qwen2 template, because both change the token count. Without that gate, the system prompt makes the text tests fire as if the model had been swapped.
+- Routing 10% of answers to a different model is caught. Routing to a 4-bit copy needs about 20% before it's caught reliably.
 
-The full tables, with run ids, are in [`reference/gpu/round2.md`](reference/gpu/round2.md). This reference is published in the ledger as profile `a8ce6958`: the weights manifest (all 11 files match Hugging Face at `a09a354`), the setup, and one run per battery with its band.
+This reference is published in the ledger as profile `a8ce6958`: the weights manifest (all 11 files match Hugging Face at `a09a354`), the setup, and one run per battery with its band.
 
 ```bash
 cargo run --release --bin tvc -- verify-reference --registry reference/registry.jsonl \
@@ -148,7 +187,7 @@ cargo run --release --bin tvc -- verify-reference --registry reference/registry.
 - **The verdict follows from the numbers.** Every threshold is the calibration's, and every verdict is recomputed. When the prompt-token check (T0) fails, the verdict must be `misconfigured`, never a swapped model.
 - **Any one answer can be opened.** `tvc reveal` on the audit's sealed responses, checked with `--reveal`.
 
-Two demo audits are in the ledger. No provider was queried: each "endpoint" is a stored GPU run standing in for one, and the audit says so. Provider A is the 4-bit AWQ copy. Its T1 statistic is 0.1983 against a threshold of 0.1239 and its T3 statistic 0.0259 against 0.0009, so the verdict is `inconsistent-with-declared-configuration`. Provider B is the real weights with CUDA graphs off. It's inside both bands, so the verdict is `consistent`.
+Two demo audits are in the ledger. No provider was queried: each "endpoint" is a stored GPU run standing in for one, and the audit says so. Provider A is the 4-bit AWQ copy. On the two tests drawn, its statistics are 0.1983 against a threshold of 0.1239 and 0.0259 against 0.0009, so the verdict is `inconsistent-with-declared-configuration`. Provider B is the real weights with CUDA graphs off. It's inside both bands, so the verdict is `consistent`.
 
 ```bash
 cargo run --release --bin tvc -- verify-audit --registry reference/registry.jsonl \
@@ -156,7 +195,7 @@ cargo run --release --bin tvc -- verify-audit --registry reference/registry.json
   --publisher 8f738e4f8e4b3ce2b820dcc9cea88635f0992a56f23eccbc4b5a8d968db421cd
 ```
 
-The scripts that built these are [`reference/gpu/publish_v2.py`](reference/gpu/publish_v2.py) and [`reference/gpu/demo_audit.py`](reference/gpu/demo_audit.py). The design notes are in [`docs/planning-prompt-protocol-v2.md`](docs/planning-prompt-protocol-v2.md). Still to build: retiring prompts once revealed, batching thousands of audits a day into one ledger record, analyst keys, and a fully public battery anyone can rerun to check our samples.
+The scripts that built these are in authenticated.si's private repository with the prompt sets. Still to build: retiring prompts once revealed, batching thousands of audits a day into one ledger record, analyst keys, and a fully public battery anyone can rerun to check our samples.
 
 ## What a check proves, and what it doesn't
 
@@ -250,8 +289,8 @@ tvc-cli/src/
   hf.rs            the Hugging Face comparison
   anchor.rs        OpenTimestamps submission, parsing and upgrade
 reference/         the real ledger (Qwen2.5-0.5B and Qwen2.5-7B references, demo audits), anchors/
-reference/gpu/     the GPU harness (vLLM, batteries T0-T4) and its results
-docs/              spec, verify-yourself walkthrough, demo script, earlier README
+reference/gpu/     (ignored) where authenticated.si's private harness is cloned
+docs/              how-it-works diagrams, spec, verify-yourself walkthrough, research digest
 ```
 
 ## Dependencies

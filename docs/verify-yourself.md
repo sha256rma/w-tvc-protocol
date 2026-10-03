@@ -136,7 +136,7 @@ tvc verify-audit --registry reference/registry.jsonl \
 ```
 
 This is a demo audit: the "endpoint" is the stored 4-bit AWQ run, standing in
-for a provider, and the document says so. The command checks that the T1 and T3
+for a provider, and the document says so. The command checks that the two
 calibrations it cites were in the ledger, and covered by an anchor, before the
 audit was recorded. It re-derives which prompts the audit had to use from the
 sealed pools, the endpoint and the date, and recomputes every verdict from the
