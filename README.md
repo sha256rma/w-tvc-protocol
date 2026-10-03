@@ -241,12 +241,13 @@ Week 3 turned it around. The party that most needs to prove what it ran is the c
 
 Roughly in order:
 
-1. SPOT's reference harness emits these documents directly, with bands keyed by catalogue check id (PW-01, ID-06, BH-01 and so on).
-2. References for the open models OpenRouter resells most (gpt-oss, Gemma 4, Qwen 3.x, Llama 3.3), on more than one GPU type, then the same batteries run against each third-party provider to count how many serve something other than the model they name.
-3. Audits of real providers in the ledger, drawn and judged as above, with revealed prompts retired from the pool and many audits batched into one record.
-4. A public calibration battery: prompts and reference samples both published, so anyone with a GPU can check our samples against theirs.
-5. Key management: an org key, analyst keys, key rotation records, and the public key published on authenticated.si.
-6. References run inside a confidential GPU with the weights measured.
+1. Replace the hash chain with a witnessed transparency log: an append-only Merkle tree with signed checkpoints, cosigned by independent witnesses, and a receipt with every verdict. A Bitcoin timestamp proves a record existed by a block, but not that it's the only version; witnesses close that gap and make one verdict checkable in milliseconds. Bitcoin stays as a daily extra. The plan is in [`docs/transparency-log-plan.md`](docs/transparency-log-plan.md).
+2. SPOT's reference harness emits these documents directly, with bands keyed by catalogue check id (PW-01, ID-06, BH-01 and so on).
+3. References for the open models OpenRouter resells most (gpt-oss, Gemma 4, Qwen 3.x, Llama 3.3), on more than one GPU type, then the same batteries run against each third-party provider to count how many serve something other than the model they name.
+4. Audits of real providers in the ledger, drawn and judged as above, with revealed prompts retired from the pool and many audits batched into one record.
+5. A public calibration battery: prompts and reference samples both published, so anyone with a GPU can check our samples against theirs.
+6. Key management: an org key, analyst keys, key rotation records, and the public key published on authenticated.si.
+7. References run inside a confidential GPU with the weights measured.
 
 ## Commands
 
