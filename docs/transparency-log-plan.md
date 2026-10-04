@@ -94,3 +94,36 @@ Each step is useful on its own: steps 1-3 already fix scaling and give cheap ver
 - Go checksum database, sum.golang.org (a tiled log with witnesses in production).
 - Sigsum (minimal transparency log with witness cosigning).
 - OpenTimestamps (Bitcoin timestamping, kept as the daily extra).
+
+## Addendum, 4 October 2026: keeping Bitcoin as the anchor
+
+The owner prefers Bitcoin as the anchor, for the same reason people choose open models: nobody controls it. Bitcoin can also close the split-view gap, without relying on witnesses, by chaining the anchors.
+
+**Chained anchors (single-use seals).**
+- Each checkpoint is committed in a Bitcoin transaction (an `OP_RETURN` with the checkpoint's root hash and tree size) that spends one output of the previous anchor transaction.
+- The first anchor's output is published in the W-TVC repository and on authenticated.si.
+- An output can be spent only once, so the anchors form one line. Publishing two different histories would mean spending the same output twice, which Bitcoin rejects.
+- A verifier walks the chain from the published first output. Each transaction must spend the previous anchor's output, and each committed checkpoint must extend the one before (consistency proof).
+- This is the single-use seal idea (Peter Todd), and the approach Mainstay used to give logs a single history on Bitcoin.
+
+**Cost.** One small transaction per anchor, a few hundred to a few thousand satoshis at typical fee rates. A daily anchor is enough, since calibrations are published days before they are used. Audits within the day are covered by the next anchor and by the receipts.
+
+**What changes in the plan.** Chained Bitcoin anchors take over the timing and the single-history job from the witnesses (change 3), and from OpenTimestamps (change 5). Witnesses and receipts still help: they give the time within the day, before the next anchor confirms. OpenTimestamps can stay as a free extra.
+
+## Addendum: why references come from weights we run
+
+W-TVC is built for references that the publisher computes from weights it holds. A reference taken from a provider's API, including the lab's own, gets much weaker guarantees. That's why authenticated.si builds every reference on its own GPUs.
+
+| What a verifier can check | Reference from weights we ran | Reference from a provider's API |
+|---|---|---|
+| Which exact files were used (`weights-manifest`, `tvc check-hf`) | Yes: every file's SHA-256 matches Hugging Face at a pinned commit | No: nobody outside the provider can hash its weights |
+| How it was run (`reference-setup`) | Engine, version, kernels, GPU, seed, request settings; specific enough to rerun | Only the API name and parameters; the serving stack is hidden |
+| Can someone else reproduce it? | Yes: same weights and setup give the same answer distribution (on the same stack, the same greedy answers) | No: the API can change silently. Log Probability Tracking found 37 silent changes on 189 OpenRouter endpoints in four months |
+| Is the honest band measured? (`honest-set`, `calibration`) | Yes: we serve the same weights several honest ways and measure the spread | Only by sampling the API over time, with no control over what changed |
+| Does a disputed answer hold up? (`tvc reveal`) | A third party reruns the revealed question on the same weights and checks the answer is plausible | Nobody can rerun the API as it was on that day |
+| Was it fixed before the audit? (log and anchor) | Yes | Yes |
+
+**What W-TVC still doesn't prove,** even with local weights: that the published answers came from those weights rather than being made up. Three things limit that:
+1. Reproducibility: a public calibration set anyone can rerun on the same weights.
+2. Reveals: any revealed question can be rerun on the same weights by a third party.
+3. Later, running references inside a confidential GPU (H100 and Blackwell support confidential computing), so a hardware attestation binds the weights' hash to the outputs. Only a publisher that runs the weights itself can do this.
