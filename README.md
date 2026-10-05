@@ -11,6 +11,10 @@ All of it is signed, kept in an append-only ledger, and timestamped in Bitcoin. 
 
 Built for **Bitshala BOSS Battle** · Tracks: **Machine Money** × **Freedom Stack**
 
+> **Judges: start with the [10-minute demo walkthrough](docs/demo-walkthrough.md).** Every command in it was run from a fresh clone. It builds the tool, verifies a real GPU reference and two provider verdicts, catches a tampered threshold, opens a sealed test question with a proof, and checks the Bitcoin timestamps.
+>
+> **What's real today:** 9 open models tested on our own GPUs; 12 of 12 swapped models caught, 5 of 5 4-bit copies caught; the Qwen2.5-7B reference, its calibrations and two demo verdicts published here and anchored in Bitcoin blocks 969564 to 969658. **Not yet:** no real provider has been checked; FP8/8-bit detection varies by model.
+
 ```
 Ship code. Beat the boss.
 ```
