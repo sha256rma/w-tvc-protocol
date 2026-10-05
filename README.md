@@ -1,5 +1,7 @@
 # W-TVC
 
+![W-TVC: verify, don't trust](docs/img/cover.png)
+
 Bitcoin showed you don't need a bank to trust a payment. W-TVC applies the same idea to AI: you shouldn't need a frontier lab to decide which questions you may ask. Open models let anyone answer anything, but today you can't trust the providers who serve them, because a provider can quietly serve any model under any name. W-TVC builds that trust without a central party.
 
 It's the open protocol behind [authenticated.si](https://authenticated.si), which tests the providers that sell open models (DeepSeek, Qwen, gpt-oss and others) against the real model, with secret prompts. W-TVC publishes what anyone needs to trust those results, without publishing the prompts:
@@ -23,6 +25,8 @@ Ship code. Beat the boss.
 
 ## Why this matters
 
+![Same idea, new domain](docs/img/bitcoin-parallel.png)
+
 **Bitcoin removed the need to trust a bank** to move money: anyone can check the rules, nobody can block a payment, and trust comes from verification instead of from an institution. AI needs the same thing.
 
 **Today, a few frontier labs decide what you may ask.** ChatGPT, Claude and Gemini choose which questions they'll answer and which they'll refuse, and they see everything you send. Nobody should need a company's permission to get an answer.
@@ -40,6 +44,8 @@ Ship code. Beat the boss.
 The same values that make Bitcoin useful (no central party, rules anyone can check) make open AI usable: more choice of models and providers, the freedom to ask what you want, and the confidence that you got the model you paid for.
 
 ## Where it's used
+
+![How W-TVC works](docs/img/protocol-flow.png)
 
 ```mermaid
 flowchart LR
@@ -187,6 +193,8 @@ cargo run --release --bin tvc -- verify-reference --registry reference/registry.
 Known limits of this round: one model, one GPU type, one engine, and only five honest variants, so the threshold itself is noisy (the worst honest variant was flagged up to 45% of the time on one test). The literature review behind these choices (the 24 papers we were given plus later work) is [`docs/reference-tests-literature.md`](docs/reference-tests-literature.md).
 
 ## Calibrations and audits a customer can check (protocol v2)
+
+![What the tests caught](docs/img/results.png)
 
 A reference on its own doesn't settle a verdict about a provider. Three more things need to be checkable: that the thresholds came from honest serving variants, that they were fixed before the provider was tested, and that the provider's prompts weren't picked by hand. Protocol v2 adds a document for each step (the formats are in [`docs/spec.md`](docs/spec.md)):
 
