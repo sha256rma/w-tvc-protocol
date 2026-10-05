@@ -19,6 +19,20 @@ Built for **Bitshala BOSS Battle** · Tracks: **Machine Money** × **Freedom Sta
 Ship code. Beat the boss.
 ```
 
+## Why this matters
+
+Closed AI services like ChatGPT, Claude and Gemini decide which questions you may ask and which they'll refuse, and they see everything you send. Open models are the way out: anyone can run them, many companies host them, and you can switch whenever you like. Nobody gets to be the gatekeeper.
+
+But that freedom has a hole. When you pay a provider on a marketplace like OpenRouter for an open model, you can't see what's behind its API. It might be the real model, a cheaper compressed copy, or a different model entirely, and you have no way to tell. So people who left the gatekeepers end up trusting an anonymous reseller instead.
+
+W-TVC closes that hole without adding a new gatekeeper:
+- **Accountable providers.** authenticated.si checks providers against the real model, so people can pick the hosts that serve what they sell.
+- **No trust in the checker either.** Every reference, threshold and verdict is signed and published, so anyone can check the work without trusting authenticated.si.
+- **Secret tests, public proof.** The test questions stay secret so providers can't game them, but their fingerprints are fixed in public before any provider is tested.
+- **Bitcoin as the clock.** Records are timestamped in Bitcoin, which no company or government controls, so nobody can quietly rewrite them later, including us.
+
+The same values that make Bitcoin useful (no central party, rules anyone can check) make open AI usable: a transparent, open ecosystem where you choose your model and can verify you got it.
+
 ## Where it's used
 
 ```mermaid
