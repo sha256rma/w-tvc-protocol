@@ -145,6 +145,31 @@ Today one party, authenticated.si, runs every honest setup. Contributions from a
 
 A flagged provider follows the same path. It submits its exact serving setup, and if that reproduces as honest, the threshold moves for everyone. Rewards for contributors come later, once admission has a track record. Details, threats and the document formats to add: [`docs/open-honest-set.md`](docs/open-honest-set.md).
 
+## Run a setup yourself
+
+The point of the open honest set is that anyone can run a model's setups, not just authenticated.si: the reference, honest variations of it, or the exact stack a provider serves. The tools to do it and to sign your own work are already in this repository:
+
+| Step | Command |
+| --- | --- |
+| Make your own signing key | `tvc keygen` |
+| Prove you ran the official weights | `tvc manifest` hashes every file, and `tvc check-hf` matches them against Hugging Face |
+| Commit to your answers without revealing them | `tvc commit-items` |
+| Sign your setup and run into a ledger | `tvc publish`, with your key in `TVC_SECRET_KEY` |
+| Open one answer if someone disputes it | `tvc reveal` and `tvc verify-reveal` |
+| Let anyone check it all | `tvc verify-reference --publisher <your key>` |
+
+What isn't built yet:
+- the public battery to run your setup on;
+- reproduction by a second party;
+- admission into a calibration;
+- verifying a ledger that mixes several signers' keys.
+
+Today `verify-reference` pins one key per check. The admission rules and the multi-key roles are in [`docs/open-honest-set.md`](docs/open-honest-set.md).
+
+## Why x402 and crypto
+
+The first users are agents that pay for their own inference, and they pay in crypto. x402 lets an HTTP server ask for payment with a `402 Payment Required` response and get paid in a stablecoin such as USDC on the next request, with no account, card or invoice. Because payment is per request and programmable, settlement can wait for the evidence: the gateway holds the payment, and it settles only while the certificate that covered the answer holds. Card payments and invoices can come later on the same receipts.
+
 ## What the ledger publishes
 
 A reference is a set of signed documents, each naming the ones it builds on by SHA-256. Protocol v2 adds the documents a verdict is judged by.
