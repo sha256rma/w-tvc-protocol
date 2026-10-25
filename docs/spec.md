@@ -70,15 +70,13 @@ The root is the Merkle tree over the leaves:
 
 A reveal is `{kind: "item-reveal/v1", index, count, salt, item, siblings}`.
 
-Selection (`tvc sample`): to pick `k` of `n` items, hash `tagged_hash("W-TVC/v2/item-select", [root, context, u64_be(counter)])` for counter 0, 1, 2 and so on. Read each digest as four big-endian `u64` draws. With `M = 2^64 - 1`, reject any draw at or above `M - (M mod n)`, take the rest `mod n`, and keep the distinct ones until there are `k`. Return them sorted.
+Selection (`tvc audit-draw`, `tvc_core::itemset::select`): to pick `k` of `n` items, hash `tagged_hash("W-TVC/v2/item-select", [root, context, u64_be(counter)])` for counter 0, 1, 2 and so on. Read each digest as four big-endian `u64` draws. With `M = 2^64 - 1`, reject any draw at or above `M - (M mod n)`, take the rest `mod n`, and keep the distinct ones until there are `k`. Return them sorted.
 
 ## Ledger lines (`tvc-core/src/registry.rs`)
 
-One JSON object per line. Every line has `v`, `sequence` (starting at 0, shared by all kinds), `previous` (the digest of the line before, all zeros for the first) and `digest`.
+One JSON object per line. Every line has `v`, `sequence` (starting at 0), `previous` (the digest of the line before, all zeros for the first) and `digest`.
 
-`v: 2` is a model registration, documented in `docs/weight-commitment.md`.
-
-`v: 3` is a document claim:
+`v: 3` is a document claim, the only line version this build reads. Versions 1 and 2 were model-weight registrations from an earlier build; they never appear in the published ledger and are now refused.
 
 ```
 {v, sequence, kind, document, refs: [hex], timestamp, signer, signature, previous, digest}

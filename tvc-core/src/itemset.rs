@@ -17,9 +17,8 @@
 //! leaf_i = tagged_hash("W-TVC/v2/item-leaf", [i, salt_i, canonical(item_i)])
 //! ```
 //!
-//! and the set's root is the canonical Merkle tree over the leaves, the same
-//! tree and the same exactly-one-accepting-path openings as the weight
-//! commitment uses. The index is in the leaf, so a revealed item cannot be
+//! and the set's root is the canonical Merkle tree over the leaves
+//! ([`crate::merkle`]), with exactly one accepting opening per item. The index is in the leaf, so a revealed item cannot be
 //! moved to another position. The 32-byte random salt is what keeps an
 //! unrevealed item secret: without it, anyone could confirm a guess at a
 //! short prompt ("What is the capital of Australia?") by hashing it. Salts are
@@ -35,7 +34,7 @@
 use serde_json::{json, Value};
 
 use crate::canonical::to_canonical_bytes;
-use crate::commitment::{verify_merkle_path, MerkleCommitment, MerkleProver};
+use crate::merkle::{verify_merkle_path, MerkleCommitment, MerkleProver};
 use crate::digest::{tagged_hash, DOMAIN_ITEM_LEAF, DOMAIN_ITEM_SELECT};
 use crate::error::{Result, TvcError};
 use crate::hex;
@@ -429,15 +428,12 @@ mod tests {
     }
 
     #[test]
-    fn item_leaves_are_separated_from_weight_leaves() {
-        // Different domains, so a weight tree and an item tree over the same
-        // bytes can never share a root.
+    fn item_leaves_are_separated_from_inner_nodes() {
+        // Different domains, so a leaf can never be passed off as an inner node
+        // over the same bytes.
         let leaf = item_leaf(0, &[0u8; SALT_LEN], &json!(0)).unwrap();
-        let weight_leaf = tagged_hash(
-            crate::digest::DOMAIN_WEIGHT_LEAF,
-            &[&0u64.to_be_bytes(), &[0u8; 32]],
-        );
-        assert_ne!(leaf, weight_leaf);
+        let node = tagged_hash(crate::digest::DOMAIN_MERKLE_NODE, &[&leaf, &leaf]);
+        assert_ne!(leaf, node);
     }
 
     #[test]

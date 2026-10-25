@@ -31,7 +31,7 @@ use tvc_core::documents::{
     KIND_REFERENCE_RUN_V2,
 };
 use tvc_core::hex;
-use tvc_core::itemset::{select, ItemReveal, ItemSet};
+use tvc_core::itemset::{ItemReveal, ItemSet};
 use tvc_core::manifest::WeightsManifest;
 use tvc_core::registry::{DocumentRecord, ModelRegistry};
 use tvc_core::signer::{unix_now, DocumentClaim};
@@ -228,18 +228,6 @@ pub fn verify_reveal(reveal_path: &Path, ledger: &Path, run: &str, set: &str) ->
     println!("It was in the committed set when that run was published; it was not added later.");
     println!();
     println!("{}", serde_json::to_string_pretty(&revealed.item).map_err(|e| e.to_string())?);
-    Ok(())
-}
-
-/// `tvc sample`
-pub fn sample(ledger: &Path, run: &str, set: &str, k: u64, context: &str) -> Result<(), String> {
-    let run = digest_arg(run, "--run")?;
-    let (root, count) = run_set(ledger, &run, set)?;
-    let chosen = select(&root, context.as_bytes(), count, k).map_err(|e| e.to_string())?;
-    println!(
-        "{k} of {count} {set}, chosen from the committed root and the context {context:?}:"
-    );
-    println!("  {}", chosen.iter().map(u64::to_string).collect::<Vec<_>>().join(" "));
     Ok(())
 }
 
@@ -639,12 +627,10 @@ fn check_anchor(ledger: &Path, registry: &ModelRegistry, profile: &[u8; 32], che
     };
     let profile_sequence = registry.get_document(profile).map_or(u64::MAX, |r| r.sequence);
     let anchored_sequence = registry
-        .records()
+        .documents()
         .iter()
-        .map(|r| (r.sequence, r.digest))
-        .chain(registry.documents().iter().map(|r| (r.sequence, r.digest)))
-        .find(|(_, digest)| digest == &anchored)
-        .map(|(sequence, _)| sequence);
+        .find(|r| r.digest == anchored)
+        .map(|r| r.sequence);
     match anchored_sequence {
         None => return check.fail("the anchored head is not a record in this ledger"),
         Some(sequence) if sequence < profile_sequence => {

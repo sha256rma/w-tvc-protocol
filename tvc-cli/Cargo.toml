@@ -1,6 +1,6 @@
 [package]
 name = "tvc-cli"
-description = "Publisher and auditor command line for the W-TVC model registry."
+description = "Publisher and verifier command line for W-TVC references, calibrations and audits."
 readme = "../README.md"
 version.workspace = true
 edition.workspace = true

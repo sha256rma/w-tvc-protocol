@@ -1,25 +1,18 @@
-//! Error taxonomy for the model identity layer.
+//! Error taxonomy for the ledger and its documents.
 //!
 //! Every fallible boundary in this crate returns [`TvcError`]. The variants are
 //! coarse at the type level and precise in their payloads, so a verifier can
-//! branch on *class* of failure — is this malformed input, or a cryptographic
-//! rejection? — without matching on strings.
+//! branch on *class* of failure (is this malformed input, or a cryptographic
+//! rejection?) without matching on strings.
 //!
-//! Three distinctions are load-bearing and deliberately not collapsed:
+//! Two distinctions are load-bearing and deliberately not collapsed:
 //!
-//! - [`TvcError::CommitmentMismatch`] means the weights presented do not hash to
-//!   the commitment the registry holds. This is the model-substitution alarm: the
-//!   signature may be perfectly valid, but it vouches for different weights.
-//! - [`TvcError::AttestationUnsigned`] means the commitment and metadata are
-//!   internally consistent but nobody with the claimed key signed them.
+//! - [`TvcError::AttestationUnsigned`] means nobody with the claimed key signed
+//!   the claim.
 //! - [`TvcError::SignerMismatch`] means a *valid* signature was produced by a key
 //!   other than the one the caller pinned. Folding this into
-//!   `AttestationUnsigned` would let any key vouch for any model, which is no
+//!   `AttestationUnsigned` would let any key vouch for any document, which is no
 //!   trust anchor at all.
-//!
-//! A publisher that swaps weights after registering should trip the first; a
-//! relay that republishes someone else's model under its own key should trip the
-//! third. Conflating them hides exactly the attacks this layer exists to catch.
 
 use core::fmt;
 
@@ -30,7 +23,7 @@ pub type Result<T> = core::result::Result<T, TvcError>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum TvcError {
-    /// A model identifier, version, or publisher name was unsafe to transport.
+    /// A document kind or other identifier was unsafe to transport.
     InvalidIdentifier {
         /// Which field was rejected.
         field: &'static str,
@@ -41,7 +34,7 @@ pub enum TvcError {
     MalformedHex(String),
     /// A secp256k1 key, signature, or message was structurally invalid.
     Signature(String),
-    /// The BIP-340 signature over a registration payload did not verify.
+    /// The BIP-340 signature over a claim did not verify.
     AttestationUnsigned,
     /// A valid signature was produced by a key other than the pinned one.
     SignerMismatch {
@@ -50,43 +43,17 @@ pub enum TvcError {
         /// x-only public key that actually signed, lowercase hex.
         observed: String,
     },
-    /// Recomputed weight commitment differs from the committed one.
-    CommitmentMismatch {
-        /// Commitment recorded in the registry.
-        expected: String,
-        /// Commitment recomputed from the weights supplied.
-        observed: String,
-    },
-    /// A commitment was requested over a weight vector holding no elements.
-    EmptyWeights,
-    /// A tensor file could not be parsed into tensors.
-    MalformedTensorFile(String),
-    /// A tensor used an element type this crate does not quantise.
-    UnsupportedDtype(String),
-    /// A weight fell outside the range the chosen fixed-point scale can encode.
-    QuantizationOverflow {
-        /// Name of the tensor holding the offending element.
-        tensor: String,
-        /// The value that could not be represented, already rendered.
-        ///
-        /// Held as text rather than `f64` deliberately: NaN is one of the values
-        /// this variant reports, and `NaN != NaN` would make equality on the
-        /// error type quietly useless.
-        value: String,
-    },
-    /// An opening was requested for an index outside the committed vector.
+    /// A Merkle tree was requested over no leaves.
+    EmptyTree,
+    /// An opening was requested for an index outside the committed tree.
     IndexOutOfRange {
         /// Index requested.
         index: usize,
         /// Number of elements actually committed.
         length: usize,
     },
-    /// A Merkle opening did not reproduce the committed root.
-    OpeningRejected,
-    /// A model version already holds a registration; the ledger is append-only.
-    DuplicateRegistration(String),
-    /// No registration exists for the requested model.
-    UnknownModel(String),
+    /// The document is already in the ledger, which is append-only.
+    DuplicateDocument(String),
     /// The ledger on disk is not a well-formed append-only record.
     LedgerCorrupt {
         /// One-based line number of the offending record, or 0 for whole-file faults.
@@ -101,18 +68,6 @@ pub enum TvcError {
         /// Digest the record claims to extend.
         expected: String,
         /// Digest actually produced by the records before it.
-        observed: String,
-    },
-    /// The registered proving-system commitment is not the expected one.
-    ///
-    /// Distinct from [`Self::CommitmentMismatch`], which is about the weights
-    /// themselves. This one fires when the weights were never in hand — the
-    /// closed-model case — and the circuit identity on record is not the one a
-    /// verifier was told to expect.
-    ProofCommitmentMismatch {
-        /// Proving-system commitment the caller pinned, or `none`.
-        expected: String,
-        /// Proving-system commitment the registry holds, or `none`.
         observed: String,
     },
     /// The ledger file grew since this handle read it, so its view is stale.
@@ -146,39 +101,23 @@ impl fmt::Display for TvcError {
             Self::Signature(detail) => write!(f, "secp256k1 failure: {detail}"),
             Self::AttestationUnsigned => write!(
                 f,
-                "BIP-340 signature over the registration payload did not verify"
+                "BIP-340 signature over the claim did not verify"
             ),
             Self::SignerMismatch { expected, observed } => write!(
                 f,
-                "signer mismatch: pinned publisher key {expected}, attestation signed by {observed}"
+                "signer mismatch: pinned key {expected}, claim signed by {observed}"
             ),
-            Self::CommitmentMismatch { expected, observed } => write!(
-                f,
-                "weight commitment mismatch: registry holds {expected}, supplied weights commit to {observed}"
-            ),
-            Self::EmptyWeights => write!(f, "cannot commit to an empty weight vector"),
-            Self::MalformedTensorFile(detail) => write!(f, "malformed tensor file: {detail}"),
-            Self::UnsupportedDtype(dtype) => {
-                write!(f, "unsupported tensor element type: {dtype}")
-            }
-            Self::QuantizationOverflow { tensor, value } => write!(
-                f,
-                "weight {value} in tensor {tensor} exceeds the range of the chosen fixed-point scale"
-            ),
+            Self::EmptyTree => write!(f, "cannot build a Merkle tree over no leaves"),
             Self::IndexOutOfRange { index, length } => write!(
                 f,
-                "index {index} is outside the committed vector of {length} elements"
+                "index {index} is outside the committed tree of {length} leaves"
             ),
-            Self::OpeningRejected => {
-                write!(f, "merkle opening did not reproduce the committed root")
-            }
-            Self::DuplicateRegistration(address) => write!(
+            Self::DuplicateDocument(what) => write!(
                 f,
-                "{address} is already registered; the registry is append-only, publish a new version instead"
+                "{what} is already in the ledger, which is append-only"
             ),
-            Self::UnknownModel(model_id) => write!(f, "no registration found for {model_id}"),
             Self::LedgerCorrupt { line, reason } => {
-                write!(f, "registry ledger corrupt at line {line}: {reason}")
+                write!(f, "ledger corrupt at line {line}: {reason}")
             }
             Self::LedgerChainBroken {
                 line,
@@ -186,15 +125,11 @@ impl fmt::Display for TvcError {
                 observed,
             } => write!(
                 f,
-                "registry ledger hash chain broken at line {line}: record extends {expected}, but the preceding records produce {observed}"
-            ),
-            Self::ProofCommitmentMismatch { expected, observed } => write!(
-                f,
-                "proving-system commitment mismatch: expected {expected}, registry holds {observed}"
+                "ledger hash chain broken at line {line}: record extends {expected}, but the preceding records produce {observed}"
             ),
             Self::LedgerChangedUnderneath { expected, observed } => write!(
                 f,
-                "another writer appended to the ledger: it was {expected} bytes when read, {observed} now; reopen the registry and retry"
+                "another writer appended to the ledger: it was {expected} bytes when read, {observed} now; reopen the ledger and retry"
             ),
             Self::Io(detail) => write!(f, "filesystem failure: {detail}"),
             Self::InvalidDocument(detail) => write!(f, "invalid document: {detail}"),

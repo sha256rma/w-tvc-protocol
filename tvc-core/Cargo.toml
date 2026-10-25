@@ -1,7 +1,7 @@
 [package]
 name = "tvc-core"
-description = "Verifiable Model Identity: weight commitments, BIP-340 registration attestations, and an append-only model registry."
-keywords = ["zkml", "commitment", "merkle", "schnorr", "model-identity"]
+description = "Public, checkable references for open-model inference: signed documents, committed test items, and an append-only ledger."
+keywords = ["llm", "verification", "merkle", "schnorr", "transparency"]
 categories = ["cryptography"]
 readme = "../README.md"
 version.workspace = true
