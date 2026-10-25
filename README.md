@@ -1,23 +1,31 @@
-# W-TVC
+# ModelCert
 
-![W-TVC: verify, don't trust](docs/img/cover.png)
+![ModelCert: pay only for the model you got](docs/img/cover.png)
 
-W-TVC is an open protocol for checking that an AI provider serves the open model it sells. A checker runs the official weights, asks secret questions, and compares a provider's answers with the real model's. W-TVC publishes everything needed to trust that verdict without trusting the checker: which weights the reference ran, how it ran them, sealed fingerprints of the secret questions and answers, the honest setups the thresholds come from, and every provider check with its numbers. It's all signed, kept in an append-only ledger and timestamped in Bitcoin.
+ModelCert is an open protocol for paying for AI inference only when you got the model you paid for. It works like HTTPS certificates, for models:
 
-The next step is an **open honest set**. A verdict of "altered" means "outside every honest setup tested", so the more honest setups there are, the fairer the verdict. Anyone with a GPU, including a provider that disputes a verdict, will be able to contribute an honest setup of a model: their engine, GPU and settings. Once someone else reproduces that setup, it widens the threshold for everyone. The design is in [`docs/open-honest-set.md`](docs/open-honest-set.md).
+- **Certificates.** Each provider gets a certificate for each model it serves. It holds while the provider keeps matching the real model on secret test questions mixed into its traffic. A provider that fails is revoked in public.
+- **Receipts.** Every answer comes back with a receipt signed by the gateway. The receipt names the model and the provider that answered, and chains to that provider's certificate.
+- **Settlement.** An agent pays per request over [x402](https://www.x402.org). The payment is held, and it settles only while the provider's certificate holds. If the provider is caught serving anything else, its held payments go back to the buyers.
 
-W-TVC is the protocol behind [authenticated.si](https://authenticated.si) (SPOT).
+Behind every certificate is a public reference: the official weights, sealed test questions, and thresholds set from honest setups of the same model. Anyone can add an honest setup. All of it is signed, kept in an append-only ledger and timestamped in Bitcoin, so anyone can recheck any receipt, certificate or verdict without trusting whoever issued it.
+
+ModelCert was called W-TVC. The code still uses that name: the `tvc` command and the `tvc-core` crate. [authenticated.si](https://authenticated.si) runs SPOT, the first gateway built on it.
 
 **What's real today:**
-- the Qwen2.5-7B reference, its calibrations and two demo verdicts, published here and anchored in Bitcoin blocks 969564 to 969658;
-- GPU references for 14 open models, run in authenticated.si's private harness.
+- the ledger, the reference and calibration documents, and the tools that verify them;
+- the Qwen2.5-7B reference with two demo verdicts, anchored in Bitcoin blocks 969564 to 969658;
+- GPU references for 14 open models in authenticated.si's private harness.
 
-**Not yet:**
-- no real provider has been checked in this ledger;
-- contributions from outside parties aren't built;
-- FP8 detection varies by model.
+**Designed, not built yet:**
+- provider certificates;
+- receipts;
+- x402 settlement;
+- outside contributions to the honest set.
 
-A [10-minute walkthrough](docs/demo-walkthrough.md) runs every check from a fresh clone.
+No real provider has been checked in this ledger.
+
+A [10-minute walkthrough](docs/demo-walkthrough.md) runs every existing check from a fresh clone.
 
 ## Why this matters
 
@@ -27,8 +35,9 @@ Bitcoin removed the need to trust a bank to move money. Anyone can check the rul
 
 A few frontier labs decide which questions their models answer, and they see everything you send. Open models are the way out: anyone can run them, many independent providers host them, and you can switch whenever you like. But an open model is only as trustworthy as whoever serves it. On a marketplace like OpenRouter, a provider can sell you "DeepSeek" and serve a cheaper compressed copy, or a different model, and you can't tell.
 
-W-TVC builds that trust the Bitcoin way:
-- **Verify, don't trust.** Providers are checked against the real model, so you can pick accountable ones.
+ModelCert builds that trust the Bitcoin way:
+- **Pay for proof.** Payments settle only for answers from providers that match the real model.
+- **Verify, don't trust.** Every answer has a receipt you can recheck.
 - **No new gatekeeper.** Every reference, threshold and verdict is signed and published, so anyone can check the checker.
 - **Secret tests, public proof.** The questions stay secret so providers can't game them, but their fingerprints are fixed in public before any provider is tested.
 - **An open definition of "honest".** The setups that decide what counts as normal come from many independent GPUs, not only the checker's.
@@ -46,9 +55,48 @@ The way to catch this from outside is to compare the endpoint with reference ans
 4. Did you change your reference after you saw my output?
 5. My setup is honest but different from yours. Why should your setups define "normal"?
 
-W-TVC answers the first four with things a third party can recompute. The open honest set is the answer to the fifth.
+ModelCert answers the first four with things a third party can recompute. The open honest set is the answer to the fifth. And for buyers the answer arrives with every request: a receipt, and a payment that settles only if the provider holds up.
 
-## How a check works
+## How it works
+
+![How ModelCert works](docs/img/protocol-flow.png)
+
+```mermaid
+sequenceDiagram
+  participant A as Your agent
+  participant G as Gateway (SPOT)
+  participant P as Provider
+  participant L as Public ledger
+  A->>G: request
+  G-->>A: 402 Payment Required, 0.002 USDC
+  A->>G: request + x402 payment
+  Note over G: payment held
+  G->>P: request (provider certificate current)
+  P-->>G: answer
+  G-->>A: answer + signed receipt (model, provider, certificate, hashes)
+  G->>L: receipt batch root
+  alt certificate still holds
+    G->>P: payment settles
+  else provider fails a secret check
+    G->>L: certificate revoked
+    G-->>A: held payments refunded
+  end
+```
+
+The receipt is the per-request piece, and the certificate is what makes it mean something. One answer on its own can't show which model wrote it. A provider's answers to secret test questions, compared with the real model over many requests, can. The receipt ties each paid answer to the certificate that covered it, so a later failed check reaches back to the payments still held.
+
+![A receipt and its chain](docs/img/receipt.png)
+
+| HTTPS | ModelCert |
+| --- | --- |
+| Root certificate | The reference: official weights by file hash, sealed questions, anchored in Bitcoin |
+| Intermediate | The calibration: thresholds from honest setups of the same model |
+| Site certificate | The provider certificate: this provider, this model, passing secret checks |
+| TLS session | The receipt: this request, this answer, this payment |
+| Certificate Transparency log | The ledger: every certificate, revocation and receipt batch, append-only |
+| Revocation | A failed check revokes the certificate, and held payments go back |
+
+## How a provider is checked
 
 ```mermaid
 flowchart LR
@@ -61,7 +109,7 @@ flowchart LR
   MA --> LINE["Threshold<br/>95% of honest mini-audits below"]
   MA --> VERDICT["Verdict<br/>altered if 90% or more of the<br/>provider's mini-audits are past it"]
   LINE --> VERDICT
-  LINE & VERDICT --> LED[("W-TVC ledger<br/>signed, timestamped in Bitcoin")]
+  LINE & VERDICT --> LED[("Public ledger<br/>signed, timestamped in Bitcoin")]
 ```
 
 - **The reference** decides what everything is measured against.
@@ -97,7 +145,7 @@ Today one party, authenticated.si, runs every honest setup. Contributions from a
 
 A flagged provider follows the same path. It submits its exact serving setup, and if that reproduces as honest, the threshold moves for everyone. Rewards for contributors come later, once admission has a track record. Details, threats and the document formats to add: [`docs/open-honest-set.md`](docs/open-honest-set.md).
 
-## What W-TVC publishes
+## What the ledger publishes
 
 A reference is a set of signed documents, each naming the ones it builds on by SHA-256. Protocol v2 adds the documents a verdict is judged by.
 
@@ -266,22 +314,25 @@ The upgrade from "pending" to "in a block" takes a few hours. `tvc verify-anchor
 
 Confidential-inference providers run models inside Intel TDX or AMD SEV enclaves and publish attestations. [awesome-private-inference](https://github.com/amiller/awesome-private-inference) re-checks them daily, and its findings show the weak point is "which model". For Chutes, "`model_name`/`revision` are never bound to the quote". For RedPill/Phala, model-weight provenance is listed as unknown.
 
-W-TVC isn't an enclave and doesn't replace one. It gives "which weights" a signed, provider-independent name an attestation could cite, and it applies the same discipline to the checker. Confidential GPUs are also how Phase 3 of the open honest set keeps the secret questions secret on a contributor's machine.
+ModelCert isn't an enclave and doesn't replace one. It gives "which weights" a signed, provider-independent name an attestation could cite, and it applies the same discipline to the checker. Confidential GPUs are also how Phase 3 of the open honest set keeps the secret questions secret on a contributor's machine.
 
 ## What's next
 
 Roughly in order:
 
-1. **Open honest set, Phase 1:**
+1. **Certificates, receipts and settlement:**
+    - provider certificates and revocations as ledger documents;
+    - a receipt format signed by the gateway, published in hourly batches as one Merkle root;
+    - x402 payments held until the certificate covering the answer has held for its settlement window;
+    - `tvc verify-receipt`, so anyone can check a receipt and its chain offline.
+2. **Open honest set, Phase 1:**
     - contributor keys;
     - a public battery per model;
     - contribution, replay and admission records;
-    - calibrations that publish every member's statistics;
-    - `tvc calibrate`, so anyone can recompute a threshold.
-2. A witnessed transparency log in place of the hash chain, so many signers share one history ([`docs/transparency-log-plan.md`](docs/transparency-log-plan.md)).
-3. References for the open models OpenRouter resells most, then the same tests against each provider, with audits of real providers in the ledger.
-4. **Open honest set, Phases 2 and 3:** single-use question slices with retirement, then confidential-GPU contributions.
-5. Rewards for admitted setups, paid from audit revenue.
+    - calibrations that publish every member's statistics, and `tvc calibrate`.
+3. A witnessed transparency log in place of the hash chain, so many signers share one history ([`docs/transparency-log-plan.md`](docs/transparency-log-plan.md)).
+4. References for the open models OpenRouter resells most, then certificates for the providers that serve them.
+5. **Open honest set, Phases 2 and 3:** single-use question slices, then confidential-GPU contributions, then rewards for contributors.
 
 ## Commands
 
