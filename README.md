@@ -2,89 +2,100 @@
 
 ![W-TVC: verify, don't trust](docs/img/cover.png)
 
-Bitcoin showed you don't need a bank to trust a payment. W-TVC applies the same idea to AI: you shouldn't need a frontier lab to decide which questions you may ask. Open models let anyone answer anything, but today you can't trust the providers who serve them, because a provider can quietly serve any model under any name. W-TVC builds that trust without a central party.
+W-TVC is an open protocol for checking that an AI provider serves the open model it sells. A checker runs the official weights, asks secret questions, and compares a provider's answers with the real model's. W-TVC publishes everything needed to trust that verdict without trusting the checker: which weights the reference ran, how it ran them, sealed fingerprints of the secret questions and answers, the honest setups the thresholds come from, and every provider check with its numbers. It's all signed, kept in an append-only ledger and timestamped in Bitcoin.
 
-It's the open protocol behind [authenticated.si](https://authenticated.si), which tests the providers that sell open models (DeepSeek, Qwen, gpt-oss and others) against the real model, with secret prompts. W-TVC publishes what anyone needs to trust those results, without publishing the prompts:
-- which exact weight files the reference used, checkable against Hugging Face;
-- how the reference was run;
-- sealed fingerprints of the secret prompts and answers;
-- the thresholds each test uses, the false-positive rate they give on honest providers, and what they catch;
-- every provider check: which prompts it had to use, its numbers and its verdict.
+The next step is an **open honest set**. A verdict of "altered" means "outside every honest setup tested", so the more honest setups there are, the fairer the verdict. Anyone with a GPU, including a provider that disputes a verdict, will be able to contribute an honest setup of a model: their engine, GPU and settings. Once someone else reproduces that setup, it widens the threshold for everyone. The design is in [`docs/open-honest-set.md`](docs/open-honest-set.md).
 
-All of it is signed, kept in an append-only ledger, and timestamped in Bitcoin. Anyone can verify it with one command, offline, without trusting authenticated.si.
+W-TVC is the protocol behind [authenticated.si](https://authenticated.si) (SPOT).
 
-Built for **Bitshala BOSS Battle** · Tracks: **Machine Money** × **Freedom Stack**
+**What's real today:**
+- the Qwen2.5-7B reference, its calibrations and two demo verdicts, published here and anchored in Bitcoin blocks 969564 to 969658;
+- GPU references for 14 open models, run in authenticated.si's private harness.
 
-> **Judges: start with the [10-minute demo walkthrough](docs/demo-walkthrough.md).** Every command in it was run from a fresh clone. It builds the tool, verifies a real GPU reference and two provider verdicts, catches a tampered threshold, opens a sealed test question with a proof, and checks the Bitcoin timestamps.
->
-> **What's real today:** 9 open models tested on our own GPUs; 12 of 12 swapped models caught, 5 of 5 4-bit copies caught; the Qwen2.5-7B reference, its calibrations and two demo verdicts published here and anchored in Bitcoin blocks 969564 to 969658. **Not yet:** no real provider has been checked; FP8/8-bit detection varies by model.
+**Not yet:**
+- no real provider has been checked in this ledger;
+- contributions from outside parties aren't built;
+- FP8 detection varies by model.
 
-```
-Ship code. Beat the boss.
-```
+A [10-minute walkthrough](docs/demo-walkthrough.md) runs every check from a fresh clone.
 
 ## Why this matters
 
 ![Same idea, new domain](docs/img/bitcoin-parallel.png)
 
-**Bitcoin removed the need to trust a bank** to move money: anyone can check the rules, nobody can block a payment, and trust comes from verification instead of from an institution. AI needs the same thing.
+Bitcoin removed the need to trust a bank to move money. Anyone can check the rules, and trust comes from verification instead of an institution. AI needs the same thing.
 
-**Today, a few frontier labs decide what you may ask.** ChatGPT, Claude and Gemini choose which questions they'll answer and which they'll refuse, and they see everything you send. Nobody should need a company's permission to get an answer.
+A few frontier labs decide which questions their models answer, and they see everything you send. Open models are the way out: anyone can run them, many independent providers host them, and you can switch whenever you like. But an open model is only as trustworthy as whoever serves it. On a marketplace like OpenRouter, a provider can sell you "DeepSeek" and serve a cheaper compressed copy, or a different model, and you can't tell.
 
-**Open models are the way out.** Anyone can run them, many independent providers host them, and you can switch whenever you like. That's the AI version of not needing a bank.
-
-**But open models are only as trustworthy as whoever serves them.** On a marketplace like OpenRouter, a provider can sell you "DeepSeek" and serve a cheaper compressed copy, or a different model entirely, and you have no way to tell. Without a way to check, people either go back to the gatekeepers or trust an anonymous reseller blindly.
-
-**W-TVC builds that trust, the Bitcoin way:**
-- **Verify, don't trust.** authenticated.si checks providers against the real model, so you can choose accountable providers and ask your questions with confidence.
-- **No new gatekeeper.** Every reference, threshold and verdict is signed and published, so anyone can check the checker. You don't have to trust authenticated.si either.
-- **Secret tests, public proof.** The test questions stay secret so providers can't game them, but their fingerprints are fixed in public before any provider is tested.
-- **Bitcoin as the clock.** Records are timestamped in Bitcoin, which no company or government controls, so nobody can quietly rewrite them later, including us.
-
-The same values that make Bitcoin useful (no central party, rules anyone can check) make open AI usable: more choice of models and providers, the freedom to ask what you want, and the confidence that you got the model you paid for.
-
-## Where it's used
-
-![How W-TVC works](docs/img/protocol-flow.png)
-
-```mermaid
-flowchart LR
-  HF["Open weights<br/>on Hugging Face"]
-  subgraph PRIV["authenticated.si (private)"]
-    REF["Reference run on our GPU<br/>secret test prompts"]
-    CAL["Calibration<br/>thresholds from honest variants"]
-    AUD["Daily audit of each provider"]
-    REF --> CAL --> AUD
-  end
-  PROV["Providers<br/>OpenRouter and others"]
-  LED[("W-TVC ledger (public)<br/>signed fingerprints and numbers")]
-  BTC[("Bitcoin<br/>via OpenTimestamps")]
-  CUST["Customer"]
-
-  HF --> REF
-  PROV -- "answers" --> AUD
-  REF -- "manifest, setup, sealed roots" --> LED
-  CAL -- "thresholds, measured power" --> LED
-  AUD -- "draws, statistics, verdict" --> LED
-  LED -- "head" --> BTC
-  AUD -- "verdict" --> CUST
-  CUST -- "tvc verify-audit" --> LED
-```
-
-The prompts and answers stay at authenticated.si. Only salted Merkle roots of them reach the ledger. A single one is opened, with a proof, when a verdict is disputed. The sequence of a daily check, the document graph and a chart of what the tests catch are in [`docs/how-it-works.md`](docs/how-it-works.md).
+W-TVC builds that trust the Bitcoin way:
+- **Verify, don't trust.** Providers are checked against the real model, so you can pick accountable ones.
+- **No new gatekeeper.** Every reference, threshold and verdict is signed and published, so anyone can check the checker.
+- **Secret tests, public proof.** The questions stay secret so providers can't game them, but their fingerprints are fixed in public before any provider is tested.
+- **An open definition of "honest".** The setups that decide what counts as normal come from many independent GPUs, not only the checker's.
+- **Bitcoin as the clock.** Records are timestamped in Bitcoin, so nobody can quietly rewrite them later, including us.
 
 ## The problem
 
 Providers sell access to open models by name, and some serve a cheaper model or a 4-bit copy under that name. On 5 May 2026 a strict client caught a private-inference gateway answering as `Qwen/Qwen3.5-122B-A10B` while billing for `deepseek-ai/DeepSeek-V3.1` ([awesome-private-inference](https://github.com/amiller/awesome-private-inference)).
 
-The way to catch this from outside is to compare the endpoint with reference answers produced by running the real model yourself. That's what our checking service, [authenticated.si](https://authenticated.si) (SPOT), does. But every verdict then rests on the reference, and a provider flagged as "likely swapped" will ask four fair questions:
+The way to catch this from outside is to compare the endpoint with reference answers from running the real model yourself. That's what authenticated.si does. But every verdict then rests on the reference, and a flagged provider will ask five fair questions:
 
 1. Which weights did you run?
 2. How did you run them?
-3. Which prompts did you use, and what did your model say?
+3. Which questions did you use, and what did your model say?
 4. Did you change your reference after you saw my output?
+5. My setup is honest but different from yours. Why should your setups define "normal"?
 
-Today the honest answer to all four is "trust us". W-TVC replaces that with things a third party can recompute.
+W-TVC answers the first four with things a third party can recompute. The open honest set is the answer to the fifth.
+
+## How a check works
+
+```mermaid
+flowchart LR
+  HF["Official weights<br/>Hugging Face"] --> REF["Reference run<br/>our GPU, secret questions"]
+  REF --> RULER["The ruler<br/>every reference answer"]
+  HON["Honest setups<br/>same weights, other engines,<br/>GPUs, settings"] --> MA["Mini-audits<br/>compare 20 answers per question<br/>with the ruler, 200 times"]
+  FAKE["Known fakes<br/>FP8, 4-bit, smaller model,<br/>hidden prompt"] --> MA
+  PROV["Provider endpoint"] --> MA
+  RULER --> MA
+  MA --> LINE["Threshold<br/>95% of honest mini-audits below"]
+  MA --> VERDICT["Verdict<br/>altered if 90% or more of the<br/>provider's mini-audits are past it"]
+  LINE --> VERDICT
+  LINE & VERDICT --> LED[("W-TVC ledger<br/>signed, timestamped in Bitcoin")]
+```
+
+- **The reference** decides what everything is measured against.
+- **The honest setups** decide how much difference is normal. They use the same weights on different engines, engine versions, GPUs and options.
+- **The known fakes** show what that threshold catches and what it misses. The calibration publishes both.
+- **The provider** is only judged. It never moves the threshold.
+
+A flag means the endpoint is outside everything honest setups produced. A pass means no detectable difference, which isn't proof the endpoint is genuine. The full walkthrough, with diagrams, is in [`docs/how-it-works.md`](docs/how-it-works.md).
+
+## Latest results
+
+From authenticated.si's private harness, October 2026, judged with 20 answers per question. These runs aren't in this ledger yet.
+
+| Model | Honest setups that passed | Altered copies caught | Missed |
+| --- | --- | --- | --- |
+| Gemma-4-26B-A4B | 23 of 23 (vLLM 0.30 to 0.32, SGLang 0.5.21 and 0.5.22, A100 and H100) | 11 of 11: FP8 on both GPUs and engines, 4-bit, smaller model, thinking on, two hidden system prompts | none |
+| Gemma-4-31B | 16 of 16 | 4 of 5: two model swaps, thinking on, Google's 4-bit | FP8 |
+| Qwen3.6-35B-A3B | 13 of 13 | 5 of 7: uncensored copy, previous generation, AWQ 4-bit, system prompt, thinking on | GPTQ 4-bit, FP8 KV cache |
+
+With 5 answers per question, FP8 and most 4-bit copies pass. The honest setups cover two engines and two GPU types. TensorRT-LLM, multi-GPU serving, B200 and AMD GPUs aren't covered yet, which is why the open honest set comes next.
+
+## The open honest set
+
+Today one party, authenticated.si, runs every honest setup. Contributions from anyone will work like this. Phase 1 is the first to build.
+
+1. **Run a public battery.** Contributors run a public version of the tests on their own GPU, with the official weights, and sign the result with their own key. No secret question leaves authenticated.si.
+2. **Reproduce on the secret battery.** A second party reruns the same setup on the secret questions:
+    - **Phase 1:** a trusted runner replays the setup.
+    - **Phase 2:** for hardware nobody can rent, we query the contributor's endpoint with a single-use slice of questions, which is then retired and published.
+    - **Phase 3:** a confidential-computing GPU releases the questions only to an attested harness.
+3. **Guard against poisoning.** A setup is admitted only if reproduction agrees with the contributor's run, and only if adding it doesn't let a known fake pass. Thresholds weight each distinct setup once, so twenty copies of one setup count once.
+4. **Recalibrate in public.** Each admission is a signed ledger record with its reasons. The new calibration publishes every member's statistics (numbers only), so anyone can recompute every threshold. Audits logged after it use it, and earlier audits keep the one they cited.
+
+A flagged provider follows the same path. It submits its exact serving setup, and if that reproduces as honest, the threshold moves for everyone. Rewards for contributors come later, once admission has a track record. Details, threats and the document formats to add: [`docs/open-honest-set.md`](docs/open-honest-set.md).
 
 ## What W-TVC publishes
 
@@ -129,7 +140,7 @@ The prompts stay secret on purpose. If they were public, a provider could recogn
 
 ## Try it
 
-Five commands, from the repository root. None of them needs a GPU, and only the last two touch the network.
+Five commands, from the repository root. None needs a GPU, and only the last two touch the network.
 
 ```bash
 cargo test --workspace
@@ -139,7 +150,7 @@ cargo run --release --bin tvc -- demo
 
 # Check the real reference in reference/ as an outsider would.
 cargo run --release --bin tvc -- verify-reference --registry reference/registry.jsonl \
-  --profile dc7d054fbd75b6c74055ab3e6c074c5a28e3606296e0a3afce05372a92616374 \
+  --profile ef0b8e428ac37ed8b83fdbab395be33ee5cbafc8d8ac38251d220bf643f17f56 \
   --publisher 8f738e4f8e4b3ce2b820dcc9cea88635f0992a56f23eccbc4b5a8d968db421cd
 
 # Compare the published Qwen manifest with Hugging Face, without downloading the weights.
@@ -150,47 +161,7 @@ cargo run --release --bin tvc -- check-hf \
 cargo run --release --bin tvc -- verify-anchor --registry reference/registry.jsonl
 ```
 
-`verify-reference` prints nine named checks and exits non-zero on the first class of failure: 2 ledger, 3 signature, 4 document, 5 weights on disk, 6 anchor. Add `--json` for machine output. [`docs/verify-yourself.md`](docs/verify-yourself.md) walks through every claim with commands you can paste.
-
-## A real reference: Qwen2.5-0.5B-Instruct
-
-`reference/` holds a ledger built on 2 October 2026 (IST) under a demo publisher key, `8f738e4f`. It isn't SPOT's production key. The ledger head `0fd05073` was submitted to the OpenTimestamps calendar at 2026-10-01 19:51 UTC.
-
-There are two profiles, because there are two artefacts:
-
-- **Skeleton** (`0a372de8`). The Hugging Face safetensors at commit `7ae557604adf`. All eight files match the hub. `model.safetensors` matches the hub's LFS hash `fdf756fa` without being downloaded. There are no runs, because this machine has no PyTorch build for its Intel CPU and Python 3.14, so it can't run safetensors. The handbook calls a profile like this a skeleton.
-- **Working** (`dc7d054f`). Ollama's `qwen2.5:0.5b` build of the same model, a 4-bit `Q4_K_M` GGUF, run with Ollama 0.24.0 on an Intel Core i9-9980HK with no GPU. Twelve prompts, three samples each at temperature 0 and seed 42. All twelve reproduced byte for byte across samples. The bands hold only measured values: Ollama counted 195 prompt tokens over the four tokenizer prompts and 554 over all twelve, identical on every sample.
-
-The two builds have different manifests (`3f976cbf` and `1fc98d37`), as they should. That gap is exactly the "quantised copy" case SPOT exists to catch. The setup record also pins Ollama's default system prompt for this tag ("You are Qwen, created by Alibaba Cloud. You are a helpful assistant."), which a provider could otherwise change silently.
-
-The reference also records the model's wrong answers. It says the capital of Australia is Sydney, and that 4821 × 37 is 159674 (it's 178377). A reference is what the real model says, not the right answer. An endpoint selling this model that gets those right is serving something else. Both prompts are opened, with proofs, in [`reference/reveals/`](reference/reveals/). The other ten stay sealed.
-
-The harness that produced the run is [`reference/run_ollama_reference.py`](reference/run_ollama_reference.py). It uses the standard library only.
-
-## A GPU reference, and what the tests catch: Qwen2.5-7B-Instruct
-
-The second reference was run on an NVIDIA L4 with vLLM 0.30.0, as an [OpenResearch](https://github.com/alphaXiv/OpenResearch) experiment tree: one git branch per question, one fixed run command, every number printed to the run log. The harness, the prompt sets and the write-ups are authenticated.si's and live in a private repository. Each test follows a published method, so its results can be compared with the paper: prompt-token counts (AgentProv, arXiv 2609.00052), answer distributions (One Token Is Enough, arXiv 2607.10252), rank uniformity (RUT, arXiv 2506.06975), kernel two-sample tests (MET, arXiv 2410.20247) and random-generation probes (IRIS, arXiv 2607.20860).
-
-**Round 1: which engine makes the reference.** With vLLM's default kernels, 12 of 32 greedy answers changed depending on what else was in the batch. With its batch-invariant kernels, 32 of 32 stayed the same, at 5-8% lower throughput. So the reference is run batch-invariant: anyone with the same stack gets the same reference. A provider won't run that stack, so the reference is still compared as a distribution of answers, not as exact strings.
-
-**Round 2: honest providers against substitutes.** Ten sample sets were collected against the reference. Five are honest variants of the same weights (default kernels, 8 sequences per batch, prefix cache off, CUDA graphs off, fp16). Five are cheaper things a provider could serve instead.
-
-- With a plain p-value, the MET test flags all five honest variants (p = 0.001). Kernel choice alone moves the output distribution enough to be seen. This matches what the literature reports for real providers.
-- With the threshold taken from the honest variants (95th percentile of the statistic, each honest variant judged only against the others), honest variants are flagged 6-10% of the time on average.
-- At that threshold, a 4-bit AWQ copy, Qwen2.5-3B and Qwen2-7B are flagged by every test at every budget down to 5 samples per prompt. Online fp8 (weights and activations) is flagged 95% of the time at 10 samples per prompt.
-- An 8-bit weight-only copy (GPTQ int8) is not flagged by anything. It sits at the honest rate.
-- The prompt-token check alone catches an injected provider system prompt and the Qwen2 template, because both change the token count. Without that gate, the system prompt makes the text tests fire as if the model had been swapped.
-- Routing 10% of answers to a different model is caught. Routing to a 4-bit copy needs about 20% before it's caught reliably.
-
-This reference is published in the ledger as profile `a8ce6958`: the weights manifest (all 11 files match Hugging Face at `a09a354`), the setup, and one run per battery with its band.
-
-```bash
-cargo run --release --bin tvc -- verify-reference --registry reference/registry.jsonl \
-  --profile a8ce6958e740643c007bae59e0a141750c07146f1ffae20a68c30e8f45c66b2e \
-  --publisher 8f738e4f8e4b3ce2b820dcc9cea88635f0992a56f23eccbc4b5a8d968db421cd
-```
-
-Known limits of this round: one model, one GPU type, one engine, and only five honest variants, so the threshold itself is noisy (the worst honest variant was flagged up to 45% of the time on one test). The literature review behind these choices (the 24 papers we were given plus later work) is [`docs/reference-tests-literature.md`](docs/reference-tests-literature.md).
+`verify-reference` prints its checks by name and exits non-zero on the first class of failure: 2 ledger, 3 signature, 4 document, 5 weights on disk, 6 anchor. Add `--json` for machine output. [`docs/verify-yourself.md`](docs/verify-yourself.md) walks through every claim with commands you can paste.
 
 ## Calibrations and audits a customer can check (protocol v2)
 
@@ -227,7 +198,47 @@ cargo run --release --bin tvc -- verify-audit --registry reference/registry.json
   --publisher 8f738e4f8e4b3ce2b820dcc9cea88635f0992a56f23eccbc4b5a8d968db421cd
 ```
 
-The scripts that built these are in authenticated.si's private repository with the prompt sets. Still to build: retiring prompts once revealed, batching thousands of audits a day into one ledger record, analyst keys, and a fully public battery anyone can rerun to check our samples.
+The scripts that built these are in authenticated.si's private repository with the prompt sets. Still to build: retiring prompts once revealed, batching thousands of audits a day into one ledger record, contributor and analyst keys, and a fully public battery anyone can rerun.
+
+## A GPU reference, and what the tests catch: Qwen2.5-7B-Instruct
+
+The second reference was run on an NVIDIA L4 with vLLM 0.30.0, as an [OpenResearch](https://github.com/alphaXiv/OpenResearch) experiment tree: one git branch per question, one fixed run command, every number printed to the run log. The harness, the prompt sets and the write-ups are authenticated.si's and live in a private repository. Each test follows a published method, so its results can be compared with the paper: prompt-token counts (AgentProv, arXiv 2609.00052), answer distributions (One Token Is Enough, arXiv 2607.10252), rank uniformity (RUT, arXiv 2506.06975), kernel two-sample tests (MET, arXiv 2410.20247) and random-generation probes (IRIS, arXiv 2607.20860).
+
+**Round 1: which engine makes the reference.** With vLLM's default kernels, 12 of 32 greedy answers changed depending on what else was in the batch. With its batch-invariant kernels, 32 of 32 stayed the same, at 5-8% lower throughput. So the reference is run batch-invariant: anyone with the same stack gets the same reference. A provider won't run that stack, so the reference is still compared as a distribution of answers, not as exact strings.
+
+**Round 2: honest providers against substitutes.** Ten sample sets were collected against the reference. Five are honest variants of the same weights (default kernels, 8 sequences per batch, prefix cache off, CUDA graphs off, fp16). Five are cheaper things a provider could serve instead.
+
+- With a plain p-value, the MET test flags all five honest variants (p = 0.001). Kernel choice alone moves the output distribution enough to be seen. This matches what the literature reports for real providers.
+- With the threshold taken from the honest variants (95th percentile of the statistic, each honest variant judged only against the others), honest variants are flagged 6-10% of the time on average.
+- At that threshold, a 4-bit AWQ copy, Qwen2.5-3B and Qwen2-7B are flagged by every test at every budget down to 5 samples per prompt. Online fp8 (weights and activations) is flagged 95% of the time at 10 samples per prompt.
+- An 8-bit weight-only copy (GPTQ int8) is not flagged by anything. It sits at the honest rate.
+- The prompt-token check alone catches an injected provider system prompt and the Qwen2 template, because both change the token count. Without that gate, the system prompt makes the text tests fire as if the model had been swapped.
+- Routing 10% of answers to a different model is caught. Routing to a 4-bit copy needs about 20% before it's caught reliably.
+
+This reference is published in the ledger as profile `a8ce6958`: the weights manifest (all 11 files match Hugging Face at `a09a354`), the setup, and one run per battery with its band.
+
+```bash
+cargo run --release --bin tvc -- verify-reference --registry reference/registry.jsonl \
+  --profile a8ce6958e740643c007bae59e0a141750c07146f1ffae20a68c30e8f45c66b2e \
+  --publisher 8f738e4f8e4b3ce2b820dcc9cea88635f0992a56f23eccbc4b5a8d968db421cd
+```
+
+Known limits of this round: one model, one GPU type, one engine, and only five honest variants, so the threshold itself is noisy (the worst honest variant was flagged up to 45% of the time on one test). The literature review behind these choices (the 24 papers we were given plus later work) is [`docs/reference-tests-literature.md`](docs/reference-tests-literature.md).
+
+## A real reference: Qwen2.5-0.5B-Instruct
+
+`reference/` holds a ledger built on 2 October 2026 (IST) under a demo publisher key, `8f738e4f`. It isn't SPOT's production key. The ledger head `0fd05073` was submitted to the OpenTimestamps calendar at 2026-10-01 19:51 UTC.
+
+There are two profiles, because there are two artefacts:
+
+- **Skeleton** (`0a372de8`). The Hugging Face safetensors at commit `7ae557604adf`. All eight files match the hub. `model.safetensors` matches the hub's LFS hash `fdf756fa` without being downloaded. There are no runs, because this machine has no PyTorch build for its Intel CPU and Python 3.14, so it can't run safetensors. The handbook calls a profile like this a skeleton.
+- **Working** (`dc7d054f`). Ollama's `qwen2.5:0.5b` build of the same model, a 4-bit `Q4_K_M` GGUF, run with Ollama 0.24.0 on an Intel Core i9-9980HK with no GPU. Twelve prompts, three samples each at temperature 0 and seed 42. All twelve reproduced byte for byte across samples. The bands hold only measured values: Ollama counted 195 prompt tokens over the four tokenizer prompts and 554 over all twelve, identical on every sample.
+
+The two builds have different manifests (`3f976cbf` and `1fc98d37`), as they should. That gap is exactly the "quantised copy" case SPOT exists to catch. The setup record also pins Ollama's default system prompt for this tag ("You are Qwen, created by Alibaba Cloud. You are a helpful assistant."), which a provider could otherwise change silently.
+
+The reference also records the model's wrong answers. It says the capital of Australia is Sydney, and that 4821 × 37 is 159674 (it's 178377). A reference is what the real model says, not the right answer. An endpoint selling this model that gets those right is serving something else. Both prompts are opened, with proofs, in [`reference/reveals/`](reference/reveals/). The other ten stay sealed.
+
+The harness that produced the run is [`reference/run_ollama_reference.py`](reference/run_ollama_reference.py). It uses the standard library only.
 
 ## What a check proves, and what it doesn't
 
@@ -253,33 +264,24 @@ The upgrade from "pending" to "in a block" takes a few hours. `tvc verify-anchor
 
 ## How it fits with secure-hardware inference
 
-Confidential-inference providers run models inside Intel TDX or AMD SEV enclaves and publish attestations. [awesome-private-inference](https://github.com/amiller/awesome-private-inference) re-checks them daily. Its findings are the clearest case for W-TVC: the weak point is "which model". For Chutes, "`model_name`/`revision` are never bound to the quote". For RedPill/Phala, model-weight provenance is listed as unknown. Tinfoil pins weights by a dm-verity root hash, and NEAR pins a Hugging Face revision.
+Confidential-inference providers run models inside Intel TDX or AMD SEV enclaves and publish attestations. [awesome-private-inference](https://github.com/amiller/awesome-private-inference) re-checks them daily, and its findings show the weak point is "which model". For Chutes, "`model_name`/`revision` are never bound to the quote". For RedPill/Phala, model-weight provenance is listed as unknown.
 
-W-TVC isn't an enclave and doesn't replace one. It does two things those systems don't:
-- It gives "which weights" a publisher-signed, provider-independent name that an attestation could cite.
-- It applies the same discipline to the checker. If SPOT one day runs its references inside an attested GPU with the weights measured, the records stay the same, and the reference outputs become evidence instead of a statement.
-
-## How we got here
-
-This repository changed direction twice, and the history is in `git log`.
-
-In week 1 (14 to 16 September) it was a Groth16 ceremony meant to prove which model served each inference, published over Nostr. That can't scale: verifying a SHA-256 Merkle root of the weights inside a circuit costs roughly 5×10¹³ constraints for a billion parameters. So it was deleted.
-
-In week 2 (18 September) it became a registry. A publisher signs a 32-byte commitment to quantised weights, recorded in a hash-chained ledger. Reading our own README, we found it promised to catch API model swaps while requiring the verifier to hold the weights. That gap led to the dual commitment. That work is still here and still tested. It's documented in [`docs/weight-commitment.md`](docs/weight-commitment.md).
-
-Week 3 turned it around. The party that most needs to prove what it ran is the checker, so W-TVC now publishes SPOT's references. The quantised commitment isn't used for that: a file manifest answers "which files" for any model size.
+W-TVC isn't an enclave and doesn't replace one. It gives "which weights" a signed, provider-independent name an attestation could cite, and it applies the same discipline to the checker. Confidential GPUs are also how Phase 3 of the open honest set keeps the secret questions secret on a contributor's machine.
 
 ## What's next
 
 Roughly in order:
 
-1. Replace the hash chain with a witnessed transparency log: an append-only Merkle tree with signed checkpoints, cosigned by independent witnesses, and a receipt with every verdict. A Bitcoin timestamp proves a record existed by a block, but not that it's the only version; witnesses close that gap and make one verdict checkable in milliseconds. Bitcoin stays as a daily extra. The plan is in [`docs/transparency-log-plan.md`](docs/transparency-log-plan.md).
-2. SPOT's reference harness emits these documents directly, with bands keyed by catalogue check id (PW-01, ID-06, BH-01 and so on).
-3. References for the open models OpenRouter resells most (gpt-oss, Gemma 4, Qwen 3.x, Llama 3.3), on more than one GPU type, then the same batteries run against each third-party provider to count how many serve something other than the model they name.
-4. Audits of real providers in the ledger, drawn and judged as above, with revealed prompts retired from the pool and many audits batched into one record.
-5. A public calibration battery: prompts and reference samples both published, so anyone with a GPU can check our samples against theirs.
-6. Key management: an org key, analyst keys, key rotation records, and the public key published on authenticated.si.
-7. References run inside a confidential GPU with the weights measured.
+1. **Open honest set, Phase 1:**
+    - contributor keys;
+    - a public battery per model;
+    - contribution, replay and admission records;
+    - calibrations that publish every member's statistics;
+    - `tvc calibrate`, so anyone can recompute a threshold.
+2. A witnessed transparency log in place of the hash chain, so many signers share one history ([`docs/transparency-log-plan.md`](docs/transparency-log-plan.md)).
+3. References for the open models OpenRouter resells most, then the same tests against each provider, with audits of real providers in the ledger.
+4. **Open honest set, Phases 2 and 3:** single-use question slices with retirement, then confidential-GPU contributions.
+5. Rewards for admitted setups, paid from audit revenue.
 
 ## Commands
 
@@ -290,15 +292,14 @@ Roughly in order:
 | `check-hf` | Compare a manifest with Hugging Face at its pinned commit. |
 | `commit-items` | Commit to a JSONL file of secret items (prompts or outputs) with fresh salts. |
 | `reveal`, `verify-reveal` | Open one committed item with its proof, and check it. |
-| `sample` | Pick items from a committed set in a way nobody can steer. |
 | `publish`, `show` | Sign a document into the ledger, and print one back. |
 | `verify-reference` | Check a profile and everything it cites, check by check. |
-| `audit-draw` | Print the prompt indices an audit must use from a battery. |
-| `verify-audit` | Check an audit: calibration first, prompts not picked, verdict follows from the numbers. |
+| `audit-draw` | Print the question indices an audit must use from a battery. |
+| `verify-audit` | Check an audit: calibration first, questions not picked, verdict follows from the numbers. |
 | `anchor`, `verify-anchor` | Timestamp the ledger head (every proof is kept in `anchors/`), and follow the proofs to a Bitcoin block. |
 | `audit` | Re-derive every digest in the ledger and list its records. |
+| `keygen` | Generate a signing key. |
 | `demo` | All of the above, offline, with the cheating attempts at the end. |
-| `keygen`, `commit`, `register`, `get`, `verify` | The earlier weight-commitment flow; see `docs/weight-commitment.md`. |
 
 The record formats, the canonical JSON rules, the item leaf and the signing domains are in [`docs/spec.md`](docs/spec.md).
 
@@ -309,11 +310,11 @@ tvc-core/src/
   canonical.rs     canonical JSON and content digests
   manifest.rs      per-file weight manifests
   itemset.rs       salted item commitments, reveals, Fiat-Shamir selection
-  documents.rs     the reference kinds (v1, and v2 batteries, calibrations, audits), the object store
-  audit.rs         how an audit draws its prompts and reaches its verdict
-  registry.rs      the append-only ledger (model registrations v2, documents v3)
-  signer.rs        BIP-340 keys, registrations, document claims
-  commitment.rs    the quantised weight commitment and its Merkle tree
+  merkle.rs        the Merkle tree under item sets
+  documents.rs     the document kinds and the object store
+  audit.rs         how an audit draws its questions and reaches its verdict
+  registry.rs      the append-only ledger of signed document claims
+  signer.rs        BIP-340 keys and document claims
   digest.rs, hex.rs, error.rs
 tvc-cli/src/
   main.rs          the tvc binary
@@ -323,8 +324,10 @@ tvc-cli/src/
   anchor.rs        OpenTimestamps submission, parsing and upgrade
 reference/         the real ledger (Qwen2.5-0.5B and Qwen2.5-7B references, demo audits), anchors/
 reference/gpu/     (ignored) where authenticated.si's private harness is cloned
-docs/              how-it-works diagrams, spec, verify-yourself walkthrough, research digest
+docs/              how it works, spec, open honest set design, verify-yourself walkthrough, research digest
 ```
+
+An earlier version of this repository also committed to quantised model weights and registered them under a publisher key. That flow answered a different question, it was never used by a published reference, and it's been removed. It remains in the git history.
 
 ## Dependencies
 
